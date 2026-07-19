@@ -26,7 +26,12 @@ if (-not $InstallDir) {
   if ($System) {
     $InstallDir = Join-Path $env:ProgramFiles "Aegis"
   } else {
-    $InstallDir = Join-Path $env:LOCALAPPDATA "Aegis"
+    $existing = Get-Command "aegis.exe" -ErrorAction SilentlyContinue
+    if ($existing) {
+      $InstallDir = Split-Path -Parent $existing.Source
+    } else {
+      $InstallDir = Join-Path $env:LOCALAPPDATA "Aegis"
+    }
   }
 }
 
@@ -52,7 +57,29 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("aegis-install-" + [Guid]::NewGuid(
 New-Item -ItemType Directory -Path $tmp | Out-Null
 
 try {
-  Info "Installing aegis $Version for windows/$releaseArch"
+  $targetPath = Join-Path $InstallDir "aegis.exe"
+  $currentVersion = ""
+  if (Test-Path $targetPath) {
+    try {
+      $line = & $targetPath version 2>$null | Select-Object -First 1
+      if ($line -match "aegis\s+(.+)$") {
+        $currentVersion = $Matches[1].Trim()
+      }
+    } catch {
+      $currentVersion = ""
+    }
+  }
+
+  if ($currentVersion) {
+    if ($currentVersion -eq $plainVersion) {
+      Info "Reinstalling aegis $Version for windows/$releaseArch at $targetPath"
+    } else {
+      Info "Updating aegis $currentVersion -> $Version for windows/$releaseArch at $targetPath"
+    }
+  } else {
+    Info "Installing aegis $Version for windows/$releaseArch at $targetPath"
+  }
+
   $zipPath = Join-Path $tmp $zipName
   $sumsPath = Join-Path $tmp "SHA256SUMS"
   Invoke-WebRequest -Uri "$baseUrl/$zipName" -OutFile $zipPath
@@ -72,7 +99,7 @@ try {
   Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
   $src = Join-Path $tmp "aegis-$plainVersion-windows-$releaseArch\aegis.exe"
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-  Copy-Item $src (Join-Path $InstallDir "aegis.exe") -Force
+  Copy-Item $src $targetPath -Force
 
   if (-not $NoPath) {
     if ($System) {
@@ -88,8 +115,8 @@ try {
     }
   }
 
-  Info "aegis installed to $(Join-Path $InstallDir 'aegis.exe')"
-  & (Join-Path $InstallDir "aegis.exe") version
+  Info "aegis ready at $targetPath"
+  & $targetPath version
 } finally {
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }

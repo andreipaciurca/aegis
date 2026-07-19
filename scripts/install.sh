@@ -6,10 +6,11 @@ version="${AEGIS_VERSION:-latest}"
 prefix="${PREFIX:-/usr/local}"
 bin_dir=""
 scope="system"
+target_explicit=0
 
 usage() {
   cat <<'USAGE'
-Install aegis from the latest GitHub release.
+Install or update aegis from the latest GitHub release.
 
 Usage:
   scripts/install.sh [--version v1.2.3] [--prefix /usr/local] [--bin-dir DIR] [--user]
@@ -23,6 +24,10 @@ Examples:
   curl -fsSL https://raw.githubusercontent.com/andreipaciurca/aegis/main/scripts/install.sh | sh
   sh scripts/install.sh --user
   sudo sh scripts/install.sh --prefix /usr/local
+
+If aegis is already on PATH and no target is provided, the installer updates
+that existing binary. Otherwise it installs to /usr/local/bin, or ~/.local/bin
+with --user.
 USAGE
 }
 
@@ -34,15 +39,18 @@ while [ "$#" -gt 0 ]; do
       ;;
     --prefix)
       prefix="${2:-}"
+      target_explicit=1
       shift 2
       ;;
     --bin-dir)
       bin_dir="${2:-}"
+      target_explicit=1
       shift 2
       ;;
     --user)
       scope="user"
       prefix="${HOME}/.local"
+      target_explicit=1
       shift
       ;;
     -h|--help)
@@ -120,7 +128,31 @@ plain_version="${version#v}"
 archive="aegis-${plain_version}-${os}-${arch}.tar.gz"
 base_url="https://github.com/${repo}/releases/download/${version}"
 
-echo "Installing aegis ${version} for ${os}/${arch}"
+if [ -z "$bin_dir" ]; then
+  if [ "$target_explicit" -eq 0 ] && command -v aegis >/dev/null 2>&1; then
+    existing_cmd="$(command -v aegis)"
+    bin_dir="$(dirname "$existing_cmd")"
+  else
+    bin_dir="${prefix}/bin"
+  fi
+fi
+
+target="${bin_dir}/aegis"
+current_version=""
+if [ -x "$target" ]; then
+  current_version="$("$target" version 2>/dev/null | awk 'NR == 1 {print $2}')"
+fi
+
+if [ -n "$current_version" ]; then
+  if [ "$current_version" = "$plain_version" ]; then
+    echo "Reinstalling aegis ${version} for ${os}/${arch} at ${target}"
+  else
+    echo "Updating aegis ${current_version} -> ${version} for ${os}/${arch} at ${target}"
+  fi
+else
+  echo "Installing aegis ${version} for ${os}/${arch} at ${target}"
+fi
+
 fetch "${base_url}/${archive}" "$tmp/$archive"
 fetch "${base_url}/SHA256SUMS" "$tmp/SHA256SUMS"
 
@@ -135,13 +167,9 @@ fi
 tar -xzf "$tmp/$archive" -C "$tmp"
 src="$tmp/aegis-${plain_version}-${os}-${arch}/aegis"
 
-if [ -z "$bin_dir" ]; then
-  bin_dir="${prefix}/bin"
-fi
-
 mkdir_install() {
   mkdir -p "$bin_dir"
-  install -m 0755 "$src" "$bin_dir/aegis"
+  install -m 0755 "$src" "$target"
 }
 
 if [ "$scope" = "user" ]; then
@@ -151,7 +179,7 @@ else
     mkdir_install
   elif command -v sudo >/dev/null 2>&1; then
     sudo mkdir -p "$bin_dir"
-    sudo install -m 0755 "$src" "$bin_dir/aegis"
+    sudo install -m 0755 "$src" "$target"
   else
     echo "install.sh: ${bin_dir} is not writable and sudo is unavailable" >&2
     echo "Try: sh scripts/install.sh --user" >&2
@@ -159,7 +187,7 @@ else
   fi
 fi
 
-echo "aegis installed to ${bin_dir}/aegis"
+echo "aegis ready at ${target}"
 if ! command -v aegis >/dev/null 2>&1; then
   echo "Add ${bin_dir} to PATH, then run: aegis version"
 else

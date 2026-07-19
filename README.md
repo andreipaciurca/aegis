@@ -272,9 +272,11 @@ iwr https://raw.githubusercontent.com/andreipaciurca/aegis/main/scripts/install.
 powershell -ExecutionPolicy Bypass -File $p -System
 ```
 
-The installers download the latest release archive from GitHub, verify it
-against `SHA256SUMS`, install `aegis`/`aegis.exe`, and add the install directory
-to PATH where appropriate.
+The installers are also updaters. If `aegis` is already on PATH and you do not
+pass a target directory, they update that existing binary. Otherwise they
+download the latest release archive from GitHub, verify it against `SHA256SUMS`,
+install `aegis`/`aegis.exe`, and add the install directory to PATH where
+appropriate.
 
 ### From source
 
