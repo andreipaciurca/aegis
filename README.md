@@ -110,10 +110,11 @@ local llama.cpp analyst.
   panel) moves a file back if it turns out to be a false positive. Restore
   refuses to run twice on the same record and refuses to overwrite a file
   that already exists at the original path.
-- **Maintenance updates** — press `u` in the TUI/paired app to refresh
-  signatures and check for newer Aegis and llama.cpp releases. Run
-  `aegis update` when you only want the scriptable signature refresh from
-  multiple abuse.ch sources: high-confidence
+- **Maintenance updates** — press `u` in the TUI/paired app, click **Update &
+  Check Versions** in the GUI, or run `aegis update` from a script (add
+  `--json` for machine-readable output) — all three refresh signatures *and*
+  check for newer Aegis and llama.cpp releases; none of them self-replace the
+  binary. Signatures come from multiple abuse.ch sources: high-confidence
   [MalwareBazaar](https://bazaar.abuse.ch/) sample hashes and medium-confidence
   [URLhaus](https://urlhaus.abuse.ch/) collected payload hashes. Aegis stores
   source provenance per hash; URLhaus-only matches are reported as review
@@ -143,11 +144,13 @@ local llama.cpp analyst.
 - **Scriptable** — `scan`/`shield`/`audit`/`update`/`status` subcommands run
   headless with meaningful exit codes, ready for cron or CI.
 - **Browser GUI** — `aegis gui` starts a local-only web interface on
-  `127.0.0.1` for people who are not comfortable with terminal workflows. It
-  exposes dashboard status, scans with one-click quarantine, quarantine
-  history with restore, signature updates, checkups and AI setup, without
-  adding an Electron-style runtime. Every API call is checked against the
-  request's origin, so a webpage open in another tab can't silently drive it.
+  `127.0.0.1` for people who are not comfortable with terminal workflows. A
+  single dashboard view leads with the protection score and summary cards;
+  Scanner, Shield, Network, **Firewall**, Audit, Checkup, AI and Quarantine
+  History are each their own tab, matching the TUI one panel at a time
+  instead of stacking everything into one long scroll. Every API call is
+  checked against the request's origin, so a webpage open in another tab
+  can't silently drive it.
 - **Paired mode** — `aegis app` launches the TUI and local browser GUI from one
   process so both surfaces talk to the same scanner, signature database, rules
   engine and checkup/AI setup code.
@@ -312,7 +315,7 @@ aegis app                 # launch both together
 aegis scan ~/Downloads    # headless scan (hashes + rules + entropy); exit 1 if threats
 aegis shield              # ransomware sweep: canaries, notes, encrypted files
 aegis audit               # list autostart entries, flag suspicious ones
-aegis update              # refresh malware signatures
+aegis update              # refresh signatures + check for aegis/llama.cpp updates
 aegis status              # one-shot summary of every subsystem
 aegis intel <sha256>      # optional VirusTotal reputation lookup
 aegis clamav ~/Downloads  # optional local ClamAV daemon scan
@@ -349,14 +352,16 @@ aegis clamav ~/Downloads --addr tcp://127.0.0.1:3310 --json
   malware signature DB and check for newer aegis/llama.cpp releases in the
   background. The app opens immediately and reports the result in the status
   area.
-- **Manual update:** press `u` in the TUI/paired app, or use the GUI
-  **Update & Check Versions** button, to refresh signatures and check Aegis /
-  llama.cpp releases. `aegis update` is intentionally narrower for scripts: it
-  refreshes signatures only. For automation:
+- **Manual update:** press `u` in the TUI/paired app, use the GUI
+  **Update & Check Versions** button, or run `aegis update` (add `--json` for
+  scripts) — all three do the same thing: refresh signatures and check
+  whether a newer aegis or llama.cpp release is available. For automation:
   `crontab -e` → `0 9 * * * /usr/local/bin/aegis update`.
-- **The app:** it is one static binary — `git pull && make install` (or drop
-  a new release binary in place). Startup checks report newer releases but do
-  not self-replace the binary.
+- **The app:** it is one static binary, and aegis never silently replaces it.
+  `aegis update` (or the checks above) will tell you a newer release exists
+  and print its URL — then `git pull && make install`, re-run the
+  [install script](#release-installer) (which doubles as an updater), or drop
+  a new release binary in place.
 - **llama.cpp:** startup checks report the latest matching llama.cpp release.
   Run `aegis ai setup --download-llama` when you want aegis to download and
   verify the selected asset.
@@ -391,8 +396,8 @@ You can also publish an exact tag from the terminal:
 ```sh
 git checkout main
 git pull
-git tag -a v1.2.3 -m "aegis v1.2.3"
-git push origin v1.2.3
+git tag -a v1.3.0 -m "aegis v1.3.0"
+git push origin v1.3.0
 ```
 
 The release will contain `.tar.gz` archives for macOS/Linux, a `.zip` for
