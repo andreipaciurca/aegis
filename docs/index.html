@@ -221,12 +221,50 @@
   .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 30px; }
   @media (max-width: 720px) { .panes { grid-template-columns: 1fr; } }
   .pane { border: 1px solid var(--line); border-radius: 8px; padding: 20px 20px 18px; position: relative; background: var(--panel); }
+  @media (prefers-reduced-motion: no-preference) {
+    .pane, .node, .step { transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+    .pane:hover { transform: translateY(-2px); border-color: var(--accent); box-shadow: 0 12px 26px -18px var(--shadow); }
+    .node:not(.head):hover { transform: translateY(-1px); border-color: var(--accent); color: var(--text); }
+    .step:hover { transform: translateX(3px); border-left-color: var(--blue); }
+  }
   .pane-title { position: absolute; top: -9px; left: 14px; background: var(--panel); padding: 0 8px; font-size: 12px; color: var(--accent); }
   .pane-title svg { width: 13px; height: 13px; vertical-align: -2px; margin-right: 4px; }
   .pane p { color: var(--subtle); font-size: 13.5px; margin-top: 2px; }
   .pane p b { color: var(--text); font-weight: 400; }
   .pane .demo { color: var(--green); font-size: 12.5px; margin-top: 12px; display: block; word-break: break-word; }
   .pane .demo.warn { color: var(--yellow); } .pane .demo.bad { color: var(--red); }
+
+  /* ---- browser GUI mockup: same tokens as .term, chrome instead of a terminal ---- */
+  .browser-mock {
+    width: min(100%, 900px); margin: 34px auto 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: 0 24px 60px -24px var(--shadow); overflow: hidden;
+  }
+  .browser-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--panel-2); border-bottom: 1px solid var(--border); }
+  .browser-addr {
+    flex: 1; display: flex; align-items: center; gap: 7px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 999px; padding: 5px 14px; color: var(--subtle); font-size: 12px; min-width: 0;
+  }
+  .browser-addr svg { width: 12px; height: 12px; color: var(--green); flex: none; }
+  .browser-addr span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .browser-body { padding: 18px 20px 22px; font-size: 13px; }
+  .gui-nav { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+  .gui-nav .chip {
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: var(--subtle); font-size: 12px;
+  }
+  .gui-nav .chip.on { border-color: var(--accent); color: var(--accent); }
+  .gui-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+  .gui-panel { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; background: rgba(17,17,27,.18); }
+  .gui-panel h4 { margin: 0 0 10px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--subtle); font-weight: 700; }
+  .gui-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 12.5px; }
+  .gui-row:first-of-type { border-top: none; padding-top: 0; }
+  .gui-row .who { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text); }
+  .gui-row .who small { display: block; color: var(--muted); font-size: 11px; }
+  .gui-pill { flex: none; border-radius: 999px; padding: 2px 9px; font-size: 10.5px; font-weight: 700; letter-spacing: .02em; }
+  .gui-pill.bad { background: rgba(243,139,168,.14); color: var(--red); }
+  .gui-pill.ok { background: rgba(166,227,161,.14); color: var(--green); }
+  .gui-btn { flex: none; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; font-size: 11.5px; color: var(--subtle); background: var(--panel-2); }
+  .gui-btn.primary { border-color: var(--accent); color: var(--accent); }
+  @media (max-width: 640px) { .gui-panels { grid-template-columns: 1fr; } .browser-addr span { display: none; } }
 
   /* ---- how it works: diagrams ---- */
   .flow { margin-top: 30px; display: flex; flex-direction: column; align-items: center; gap: 0; }
@@ -297,6 +335,7 @@
   <span class="brand">aegis</span>
   <div class="links">
     <a href="#features">features</a>
+    <a href="#gui">gui</a>
     <a href="#how">how it works</a>
     <a href="#quickstart">quickstart</a>
     <a href="#ai">local ai</a>
@@ -430,7 +469,7 @@
   <div class="wrap">
     <div class="stat"><div class="n">3.4 <em>GB/s</em></div><div class="l">scan throughput</div></div>
     <div class="stat"><div class="n">17 <em>MB</em></div><div class="l">peak memory</div></div>
-    <div class="stat"><div class="n">7.0 <em>MB</em></div><div class="l">binary, statically linked</div></div>
+    <div class="stat"><div class="n">8.0 <em>MB</em></div><div class="l">binary, statically linked</div></div>
     <div class="stat"><div class="n">0</div><div class="l">daemons left running</div></div>
   </div>
 </div>
@@ -447,7 +486,8 @@
            updatable <b>YARA-lite rule engine</b> (reverse shells, Mimikatz,
            PowerShell cradles, webshells, coinminers), and <b>entropy
            analysis</b> for packed binaries. One key quarantines a threat —
-           <b>chmod 000</b>, JSON audit log, nothing silently deleted.</p>
+           <b>chmod 000</b>, JSON audit log — and <code>aegis restore</code>
+           undoes it if you were wrong; nothing is ever silently deleted.</p>
         <span class="demo bad">✗ CRITICAL  loader.ps1 — PowerShell download-and-execute cradle</span>
       </div>
       <div class="pane">
@@ -486,10 +526,11 @@
       <div class="pane">
         <span class="pane-title">┤ updates ├</span>
         <p>Startup refreshes MalwareBazaar and URLhaus payload hashes, checks
-           whether a newer aegis release exists, and checks the latest llama.cpp release. Press
-           <b>u</b> to re-run that maintenance bundle; binary and model updates
-           are reported, never silently replaced.</p>
-        <span class="demo">✓ signatures updated: +638 new (639 total) · 10 rules</span>
+           whether a newer aegis release exists, and checks the latest llama.cpp
+           release. Press <b>u</b> in the TUI/GUI or run <code>aegis update</code>
+           from a script — same maintenance bundle either way; binary and model
+           updates are reported, never silently replaced.</p>
+        <span class="demo">✓ signatures +633 (634 total) · Aegis current · llama.cpp b10068</span>
       </div>
       <div class="pane">
         <span class="pane-title">┤ osint ├</span>
@@ -505,6 +546,56 @@
            aegis stream files with ClamAV's <b>INSTREAM</b> protocol. No vendor
            upload, no bundled ClamAV code or database, just explicit local scanning.</p>
         <span class="demo">aegis clamav ~/Downloads --json</span>
+      </div>
+    </div>
+  </section>
+
+  <section id="gui" class="reveal">
+    <p class="sec-label">not a terminal person?</p>
+    <h2>Same core, in a browser tab.</h2>
+    <p class="sec-intro"><code>aegis gui</code> starts a local-only web server on
+      <code>127.0.0.1</code> — no Electron, no telemetry, no separate install.
+      <code>aegis app</code> runs it alongside the TUI so actions in either one
+      show up in both. Every request is checked against its origin, so a
+      webpage open in another tab can't drive it while it's running.</p>
+
+    <div class="browser-mock">
+      <div class="browser-bar">
+        <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+        <div class="browser-addr">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z" stroke="currentColor" stroke-width="2"/></svg>
+          <span>127.0.0.1:53211 — Aegis GUI</span>
+        </div>
+      </div>
+      <div class="browser-body">
+        <div class="gui-nav">
+          <span class="chip on">Dashboard</span><span class="chip">Scanner</span><span class="chip">Shield</span>
+          <span class="chip">Network</span><span class="chip">Audit</span><span class="chip">Checkup</span>
+          <span class="chip">AI</span><span class="chip">History</span>
+        </div>
+        <div class="term-grid" style="grid-template-columns:repeat(3,minmax(0,1fr));margin-top:0">
+          <div class="term-card"><div class="label">PROTECTION SCORE</div><div class="value ok">92%</div><div class="note">Excellent</div></div>
+          <div class="term-card"><div class="label">FIREWALL</div><div class="value ok">Active</div><div class="note">macOS Application FW</div></div>
+          <div class="term-card"><div class="label">RANSOM SHIELD</div><div class="value ok">0 alerts</div><div class="note">8 canaries</div></div>
+        </div>
+        <div class="gui-panels">
+          <div class="gui-panel">
+            <h4>Scanner — 1 threat found</h4>
+            <div class="gui-row">
+              <span class="who">loader.ps1<small>PowerShell download-and-execute cradle</small></span>
+              <span class="gui-pill bad">CRITICAL</span>
+              <button class="gui-btn primary" type="button" disabled>Quarantine</button>
+            </div>
+          </div>
+          <div class="gui-panel">
+            <h4>Quarantine history</h4>
+            <div class="gui-row">
+              <span class="who">loader.ps1<small>restored 2 min ago</small></span>
+              <span class="gui-pill ok">RESTORED</span>
+              <button class="gui-btn" type="button" disabled>Restore</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -621,35 +712,18 @@ aegis scan /tmp</span></code></div>
         <span class="pane-title">useful companion</span>
         <p>A chat or small status companion can summarize checkups, explain new
         KEV/NVD items and use approved local notes. It should learn as local
-        context, not by silently retraining on private files.</p>
+        context, not by silently retraining on private files — and never by
+        replacing the deterministic detections above.</p>
         <code class="demo">aegis ai remember "Port 5000 is expected on this dev box"
 aegis ai chat</code>
       </div>
-      <div class="pane">
-        <span class="pane-title">fast state</span>
-        <p>SQLite is planned for durable scan history, checkup caches and trusted
-        local context. The scan engine stays streaming and parallel so database
-        writes never slow the per-file hot path.</p>
-        <code class="demo">aegis checkup
-aegis scan ~/Downloads --ai</code>
-      </div>
-      <div class="pane">
-        <span class="pane-title">external intel</span>
-        <p>VirusTotal is available as an opt-in hash lookup. STIX/TAXII and MISP
-        are the right future shape for team threat-intel connectors, with
-        credentials and privacy labels made visible.</p>
-        <code class="demo">export VT_API_KEY=...
-aegis intel &lt;sha256&gt;</code>
-      </div>
-      <div class="pane">
-        <span class="pane-title">free sources</span>
-        <p>Automatic feeds stay limited to public defensive sources. VirusSign's
-        free lists are useful for researchers but account-limited and may include
-        samples, so aegis keeps them manual.</p>
-        <code class="demo">aegis update
-aegis clamav ~/Downloads</code>
-      </div>
     </div>
+    <p class="sec-intro" style="margin-top:24px;">
+      VirusTotal and ClamAV are covered above under <a href="#features">osint</a>
+      and <a href="#features">clamav bridge</a> — the AI analyst never triggers
+      either on its own. Roadmap notes on durable storage and team threat-intel
+      connectors live in the <a href="https://github.com/andreipaciurca/aegis#storage-and-performance-roadmap">README</a>.
+    </p>
   </section>
 
   <section id="keys" class="reveal">
@@ -661,6 +735,7 @@ aegis clamav ~/Downloads</code>
         <tr><td><kbd>1</kbd>–<kbd>7</kbd> / <kbd>tab</kbd></td><td>switch panes</td></tr>
         <tr><td><kbd>u</kbd></td><td>update signatures, from anywhere</td></tr>
         <tr><td><kbd>s</kbd> <kbd>e</kbd> <kbd>c</kbd> + <kbd>x</kbd></td><td>scan · edit path · cancel · quarantine (Scanner)</td></tr>
+        <tr><td><kbd>v</kbd></td><td>view quarantine history · <kbd>x</kbd> restore a file (Scanner)</td></tr>
         <tr><td><kbd>d</kbd> <kbd>c</kbd> <kbd>s</kbd> <kbd>m</kbd></td><td>deploy canaries · clear · sweep · monitor (Shield)</td></tr>
         <tr><td><kbd>k</kbd> <kbd>b</kbd></td><td>kill process · block port (Network)</td></tr>
         <tr><td><kbd>e</kbd> <kbd>d</kbd> <kbd>t</kbd></td><td>firewall enable · disable · stealth</td></tr>
@@ -769,6 +844,33 @@ aegis clamav ~/Downloads</code>
       });
     }, { rootMargin: "0px 0px -8% 0px", threshold: 0.05 });
     document.querySelectorAll(".reveal").forEach(function (el) { io.observe(el); });
+  })();
+
+  // Count the measured stats up from zero once they scroll into view — a
+  // small, one-time flourish, not a looping animation.
+  (function () {
+    var nums = document.querySelectorAll(".stat .n");
+    if (!nums.length || matchMedia("(prefers-reduced-motion: reduce)").matches || !("IntersectionObserver" in window)) return;
+    function animate(el) {
+      var text = el.firstChild.textContent.trim();
+      var target = parseFloat(text);
+      if (isNaN(target) || target === 0) return;
+      var decimals = text.indexOf(".") >= 0 ? text.split(".")[1].length : 0;
+      var start = performance.now(), duration = 900;
+      function step(now) {
+        var p = Math.min((now - start) / duration, 1);
+        var eased = 1 - Math.pow(1 - p, 3);
+        el.firstChild.textContent = (target * eased).toFixed(decimals) + " ";
+        if (p < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { animate(e.target); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.6 });
+    nums.forEach(function (el) { io.observe(el); });
   })();
 </script>
 
