@@ -29,7 +29,7 @@ import (
 	"github.com/andreipaciurca/aegis/internal/signatures"
 )
 
-var Version = "1.2.2"
+var Version = "1.2.3"
 
 type tabID int
 

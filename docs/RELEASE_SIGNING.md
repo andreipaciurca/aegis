@@ -30,18 +30,18 @@ You can also push an exact semantic version tag yourself:
 ```sh
 git checkout main
 git pull
-git tag -a v1.2.0 -m "aegis v1.2.0"
-git push origin v1.2.0
+git tag -a v1.2.3 -m "aegis v1.2.3"
+git push origin v1.2.3
 ```
 
 The release workflow uploads:
 
 ```text
-aegis-1.2.0-darwin-arm64.tar.gz
-aegis-1.2.0-darwin-amd64.tar.gz
-aegis-1.2.0-linux-amd64.tar.gz
-aegis-1.2.0-linux-arm64.tar.gz
-aegis-1.2.0-windows-amd64.zip
+aegis-1.2.3-darwin-arm64.tar.gz
+aegis-1.2.3-darwin-amd64.tar.gz
+aegis-1.2.3-linux-amd64.tar.gz
+aegis-1.2.3-linux-arm64.tar.gz
+aegis-1.2.3-windows-amd64.zip
 SHA256SUMS
 ```
 
@@ -49,7 +49,7 @@ Each platform archive includes the executable plus `README.md`, `SECURITY.md`
 and `LICENSE`.
 
 You can also run the `Release` workflow manually from GitHub Actions and pass an
-existing tag such as `v1.2.0`.
+existing tag such as `v1.2.3`.
 
 ## Local Build Artifacts
 
@@ -99,7 +99,7 @@ make checksums
 For distribution outside the App Store, notarize the signed binaries or archives:
 
 ```sh
-xcrun notarytool submit dist/aegis-1.2.0-darwin-arm64.zip \
+xcrun notarytool submit dist/aegis-1.2.3-darwin-arm64.zip \
   --apple-id "$APPLE_ID" \
   --team-id "$APPLE_TEAM_ID" \
   --password "$APPLE_APP_PASSWORD" \

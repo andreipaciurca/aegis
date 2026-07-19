@@ -5,7 +5,7 @@
 [![Pages](https://github.com/andreipaciurca/aegis/actions/workflows/pages/pages-build-deployment/badge.svg)](https://andreipaciurca.github.io/aegis/)
 [![Go](https://img.shields.io/github/go-mod/go-version/andreipaciurca/aegis)](go.mod)
 [![Latest release](https://img.shields.io/github/v/release/andreipaciurca/aegis?include_prereleases)](https://github.com/andreipaciurca/aegis/releases)
-[![License](https://img.shields.io/github/license/andreipaciurca/aegis)](LICENSE)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-a6e3a1)](LICENSE)
 [![Repo](https://img.shields.io/badge/source-GitHub-89b4fa)](https://github.com/andreipaciurca/aegis)
 
 A fast, minimal internet-security app for the terminal and browser: **malware &
@@ -374,8 +374,8 @@ You can also publish an exact tag from the terminal:
 ```sh
 git checkout main
 git pull
-git tag -a v1.2.0 -m "aegis v1.2.0"
-git push origin v1.2.0
+git tag -a v1.2.3 -m "aegis v1.2.3"
+git push origin v1.2.3
 ```
 
 The release will contain `.tar.gz` archives for macOS/Linux, a `.zip` for
