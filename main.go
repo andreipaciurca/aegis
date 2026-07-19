@@ -15,7 +15,7 @@
 //	aegis app        TUI + local browser GUI together
 //	aegis history    list quarantine history
 //	aegis restore ID undo a quarantine (by stored path or hash)
-//	aegis update     refresh the signature database
+//	aegis update     refresh signatures, check for aegis/llama.cpp updates
 //	aegis status     one-shot security summary
 package main
 
@@ -39,6 +39,7 @@ import (
 	"github.com/andreipaciurca/aegis/internal/firewall"
 	"github.com/andreipaciurca/aegis/internal/gui"
 	"github.com/andreipaciurca/aegis/internal/intel"
+	"github.com/andreipaciurca/aegis/internal/maintenance"
 	"github.com/andreipaciurca/aegis/internal/netmon"
 	"github.com/andreipaciurca/aegis/internal/persist"
 	"github.com/andreipaciurca/aegis/internal/ransom"
@@ -103,7 +104,7 @@ func main() {
 		case "restore":
 			os.Exit(cliRestore(os.Args[2:]))
 		case "update":
-			os.Exit(cliUpdate(db))
+			os.Exit(cliUpdate(db, os.Args[2:]))
 		case "status":
 			os.Exit(cliStatus(db, eng, os.Args[2:]))
 		default:
@@ -127,7 +128,7 @@ usage:
 everyday:
   scan PATH             scan files; exit 1 only when threats are found
   status                one-shot local protection summary
-  update                refresh malware signatures
+  update                refresh signatures, check for aegis/llama.cpp updates
   gui                   local browser GUI
 
 protection:
@@ -239,9 +240,13 @@ the record as restored. Refuses to run twice on the same record and refuses
 to overwrite a file that already exists at the original path. Find the ID to
 pass with aegis history, or in the TUI Scanner tab (press v, then x).`)
 	case "update":
-		fmt.Println(`aegis update
+		fmt.Println(`aegis update [--json]
 
-Refreshes malware hashes from public abuse.ch defensive feeds.`)
+Refreshes malware signatures from public abuse.ch defensive feeds, and checks
+whether a newer aegis release or llama.cpp release is available — the same
+checks that run at TUI/GUI startup and on pressing u. aegis never
+self-replaces its own binary; if a newer release exists, this prints the
+release URL so you can re-run the install script or download it yourself.`)
 	default:
 		fmt.Fprintf(os.Stderr, "aegis: unknown help topic %q\n\n", topic)
 		usage()
@@ -732,14 +737,30 @@ func cliRestore(args []string) int {
 	return 0
 }
 
-func cliUpdate(db *signatures.DB) int {
-	fmt.Println("fetching signatures from MalwareBazaar and URLhaus payload feeds")
-	added, err := db.Update()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "update failed:", err)
+func cliUpdate(db *signatures.DB, args []string) int {
+	_, jsonMode := splitJSON(args)
+	if !jsonMode {
+		fmt.Println("checking for updates: signatures, aegis release, llama.cpp release")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	report := maintenance.Startup(ctx, db, ui.Version)
+	if jsonMode {
+		encodeJSON(report)
+		if report.SignatureError != "" {
+			return 1
+		}
+		return 0
+	}
+	text, isErr := maintenance.Summary(report)
+	fmt.Println(text)
+	if report.Aegis.Update {
+		fmt.Printf("→ aegis %s is available (you have %s): %s\n", report.Aegis.Latest, report.Aegis.Current, report.Aegis.ReleaseURL)
+		fmt.Println("  aegis does not self-replace; re-run the install script or download the release yourself.")
+	}
+	if isErr {
 		return 1
 	}
-	fmt.Printf("added %d new hashes (%d total)\n", added, db.Count())
 	return 0
 }
 
