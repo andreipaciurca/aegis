@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<meta name="robots" content="index,follow">
+<link rel="canonical" href="https://andreipaciurca.github.io/aegis/404.html">
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<title>aegis - page not found</title>
+<style>
+  :root {
+    --bg:#11111b; --panel:#1e1e2e; --line:#45475a; --text:#cdd6f4;
+    --subtle:#9399b2; --accent:#cba6f7; --green:#a6e3a1; --yellow:#f9e2af;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { min-height:100vh; margin:0; display:grid; place-items:center; background:var(--bg); color:var(--text); font-family:var(--mono); }
+  main { width:min(720px, calc(100vw - 32px)); border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:28px; }
+  .brand { display:inline-block; background:var(--accent); color:var(--bg); font-weight:800; padding:3px 10px; border-radius:4px; }
+  h1 { margin:28px 0 12px; font-size:clamp(30px, 9vw, 76px); line-height:1; }
+  p { color:var(--subtle); line-height:1.7; max-width:58ch; }
+  code { color:var(--green); }
+  a { color:var(--accent); }
+  .actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:22px; }
+  .btn { border:1px solid var(--line); border-radius:6px; padding:9px 12px; text-decoration:none; }
+  .btn.primary { border-color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <span class="brand">AEGIS</span>
+  <h1>404</h1>
+  <p><code>route not found</code>. The scanner checked this path and came back empty.
+  Head back to the dashboard or inspect the source.</p>
+  <div class="actions">
+    <a class="btn primary" href="./index.html">back to aegis</a>
+    <a class="btn" href="./trust.html">trust page</a>
+    <a class="btn" href="https://github.com/andreipaciurca/aegis">GitHub</a>
+  </div>
+</main>
+</body>
+</html>

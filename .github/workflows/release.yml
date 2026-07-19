@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional exact release tag, for example v1.2.0"
+        required: false
+      bump:
+        description: "Version bump to compute when tag is empty"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+            if [ -z "$tag" ]; then
+              latest="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)"
+              make_version="$(awk '/^VERSION[[:space:]]*[?:]?=/ { print $NF; exit }' Makefile)"
+              make_version="${make_version:-0.0.0}"
+              make_tag="v$make_version"
+              if [ -z "$latest" ]; then
+                latest="$make_tag"
+              else
+                highest="$(printf '%s\n%s\n' "$latest" "$make_tag" | sort -V | tail -1)"
+                latest="$highest"
+              fi
+              version="${latest#v}"
+              IFS=. read -r major minor patch <<< "$version"
+              case "${{ inputs.bump }}" in
+                major) major=$((major + 1)); minor=0; patch=0 ;;
+                minor) minor=$((minor + 1)); patch=0 ;;
+                patch) patch=$((patch + 1)) ;;
+                *) echo "unknown bump: ${{ inputs.bump }}" >&2; exit 2 ;;
+              esac
+              tag="v${major}.${minor}.${patch}"
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag must look like v1.2.0; got $tag" >&2
+            exit 2
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: make test
+
+      - name: Build release archives and checksums
+        run: |
+          make clean
+          make checksums VERSION="${{ steps.version.outputs.version }}"
+          make verify-release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: aegis ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS
