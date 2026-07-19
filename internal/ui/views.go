@@ -97,9 +97,11 @@ func (m Model) viewFooter() string {
 		case tabScanner:
 			if m.editing {
 				keys = [][2]string{{"enter/esc", "done editing"}}
+			} else if m.quarantineView {
+				keys = [][2]string{{"↑↓", "select"}, {"x", "restore"}, {"r", "refresh"}, {"v/esc", "back to scanner"}}
 			} else {
 				keys = [][2]string{{"s", "scan"}, {"e", "edit path"}, {"c", "cancel"},
-					{"↑↓", "select"}, {"x", "quarantine"}}
+					{"↑↓", "select"}, {"x", "quarantine"}, {"v", "quarantine history"}}
 			}
 		case tabShield:
 			keys = [][2]string{{"d", "deploy canaries"}, {"c", "clear"}, {"s", "sweep now"}, {"m", "monitor"}}
@@ -269,7 +271,7 @@ func (m Model) viewHelp() string {
 		cardTitleStyle.Render("START HERE") + "\n" +
 			textStyle.Render("1 Dashboard gives the summary. Press tab to explore. Press u to update signatures."),
 		cardTitleStyle.Render("MAIN WORKFLOWS") + "\n" +
-			helpLine("2 Scanner", "s scan, e edit path, x quarantine a selected finding") + "\n" +
+			helpLine("2 Scanner", "s scan, e edit path, x quarantine a finding, v view/restore quarantine history") + "\n" +
 			helpLine("3 Shield", "d deploy canaries, s sweep, m monitor for ransomware tampering") + "\n" +
 			helpLine("4 Network", "select a connection, k kill, b show firewall block command") + "\n" +
 			helpLine("5 Firewall", "e enable, d disable, t toggle stealth when supported") + "\n" +
@@ -363,6 +365,9 @@ func card(title, value, note string, width int) string {
 // ---- scanner ----
 
 func (m Model) viewScanner() string {
+	if m.quarantineView {
+		return m.viewQuarantine()
+	}
 	var b strings.Builder
 	b.WriteString("\n  " + cardTitleStyle.Render("TARGET") + "\n")
 	b.WriteString("  " + m.pathInput.View() + "\n\n")
@@ -411,6 +416,52 @@ func (m Model) viewScanner() string {
 				line = "  " + line
 			}
 			b.WriteString("  " + line + "\n")
+		}
+	}
+	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("  press v to view quarantine history (%d record(s))", len(m.quarHistory))) + "\n")
+	return b.String()
+}
+
+// ---- quarantine history / restore ----
+
+func (m Model) viewQuarantine() string {
+	var b strings.Builder
+	b.WriteString("\n  " + cardTitleStyle.Render("QUARANTINE HISTORY") + "\n")
+	if m.quarBusy && len(m.quarHistory) == 0 {
+		b.WriteString("  " + m.spin.View() + dimStyle.Render(" loading…") + "\n")
+		return b.String()
+	}
+	if len(m.quarHistory) == 0 {
+		b.WriteString(dimStyle.Render("  nothing quarantined yet — press esc to go back") + "\n")
+		return b.String()
+	}
+	maxRows := max(m.height-16, 3)
+	start := 0
+	if m.quarSel >= maxRows {
+		start = m.quarSel - maxRows + 1
+	}
+	for i := start; i < len(m.quarHistory) && i < start+maxRows; i++ {
+		r := m.quarHistory[i]
+		status := badStyle.Render("quarantined")
+		if r.Restored {
+			status = okStyle.Render("restored")
+		}
+		path := shortenPath(r.Original, m.width-46)
+		line := fmt.Sprintf("%s  %s  %s", status, textStyle.Render(path), dimStyle.Render(r.When.Format("2006-01-02 15:04")))
+		if i == m.quarSel {
+			line = selStyle.Render("▸ ") + line
+		} else {
+			line = "  " + line
+		}
+		b.WriteString("  " + line + "\n")
+	}
+	if m.quarSel < len(m.quarHistory) {
+		r := m.quarHistory[m.quarSel]
+		b.WriteString("\n  " + dimStyle.Render("reason: ") + textStyle.Render(r.Reason) + "\n")
+		if r.Restored && r.RestoredAt != nil {
+			b.WriteString("  " + dimStyle.Render("restored: ") + okStyle.Render(r.RestoredAt.Format("2006-01-02 15:04")) + "\n")
+		} else {
+			b.WriteString("  " + dimStyle.Render("press x to restore this file to its original location") + "\n")
 		}
 	}
 	return b.String()

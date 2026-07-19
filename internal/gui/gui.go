@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,18 +49,22 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 	}
 	srv := &Server{db: db, eng: eng, version: version, onEvent: opts.OnEvent}
 	mux := http.NewServeMux()
+	api := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, requireSameOrigin(h)) }
 	mux.HandleFunc("/", srv.index)
-	mux.HandleFunc("/api/status", srv.status)
-	mux.HandleFunc("/api/scan", srv.scan)
-	mux.HandleFunc("/api/update", srv.update)
-	mux.HandleFunc("/api/checkup", srv.checkup)
-	mux.HandleFunc("/api/network", srv.network)
-	mux.HandleFunc("/api/audit", srv.audit)
-	mux.HandleFunc("/api/shield", srv.shield)
-	mux.HandleFunc("/api/ai/status", srv.aiStatus)
-	mux.HandleFunc("/api/ai/remember", srv.aiRemember)
-	mux.HandleFunc("/api/ai/setup", srv.aiSetup)
-	mux.HandleFunc("/api/startup", srv.startup)
+	api("/api/status", srv.status)
+	api("/api/scan", srv.scan)
+	api("/api/update", srv.update)
+	api("/api/checkup", srv.checkup)
+	api("/api/network", srv.network)
+	api("/api/audit", srv.audit)
+	api("/api/shield", srv.shield)
+	api("/api/quarantine", srv.quarantine)
+	api("/api/history", srv.history)
+	api("/api/restore", srv.restore)
+	api("/api/ai/status", srv.aiStatus)
+	api("/api/ai/remember", srv.aiRemember)
+	api("/api/ai/setup", srv.aiSetup)
+	api("/api/startup", srv.startup)
 	srv.startMaintenance(ctx, opts.Version)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -87,6 +92,35 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 		}
 		return err
 	}
+}
+
+// requireSameOrigin blocks the well-known "a webpage open in another tab
+// silently calls your localhost tool" pattern. The GUI binds to 127.0.0.1
+// with no login (it's a single-user local tool), so this is the cheap
+// equivalent: reject browser requests that didn't originate from this page,
+// while still allowing non-browser callers (curl, scripts) which don't send
+// these headers at all.
+func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !sameOriginOrTrusted(r) {
+			http.Error(w, "cross-origin requests to the Aegis GUI API are not allowed", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func sameOriginOrTrusted(r *http.Request) bool {
+	// Modern browsers send Sec-Fetch-Site on essentially every request; it's
+	// the most reliable signal and covers cases plain Origin checks miss.
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+		return site == "same-origin" || site == "none"
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true // no Origin header at all: not a cross-origin browser fetch
+	}
+	return origin == "http://"+r.Host
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +288,77 @@ func (s *Server) shield(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) quarantine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Path     string `json:"path"`
+		SHA256   string `json:"sha256"`
+		Reason   string `json:"reason"`
+		Severity string `json:"severity"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	sev := scanner.SevWarning
+	switch strings.ToUpper(req.Severity) {
+	case "CRITICAL":
+		sev = scanner.SevCritical
+	case "INFO":
+		sev = scanner.SevInfo
+	}
+	rec, err := scanner.Quarantine(scanner.Threat{Path: req.Path, SHA256: req.SHA256, Reason: req.Reason, Severity: sev})
+	if err != nil {
+		s.emit("quarantine", "GUI quarantine failed: "+err.Error(), true)
+		writeJSON(w, map[string]any{"error": err.Error()})
+		return
+	}
+	s.emit("quarantine", "GUI quarantined "+rec.Original, false)
+	writeJSON(w, map[string]any{"record": rec, "error": ""})
+}
+
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	recs, err := scanner.QuarantineHistory()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"quarantine": recs})
+}
+
+func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	rec, err := scanner.Restore(req.ID)
+	if err != nil {
+		s.emit("restore", "GUI restore failed: "+err.Error(), true)
+		writeJSON(w, map[string]any{"record": rec, "error": err.Error()})
+		return
+	}
+	s.emit("restore", "GUI restored "+rec.Original, false)
+	writeJSON(w, map[string]any{"record": rec, "error": ""})
 }
 
 func (s *Server) aiStatus(w http.ResponseWriter, r *http.Request) {
@@ -549,7 +654,7 @@ footer{max-width:1220px;margin:0 auto;padding:0 18px 28px;color:var(--muted);fon
   <section class="cols section">
     <div class="panel view" data-view="dashboard scan">
       <h2>Scanner</h2>
-      <p class="muted">Scan a folder or file with the same hash, rule, entropy, extension, and EICAR checks used by the TUI.</p>
+      <p class="muted">Scan a folder or file with the same hash, rule, entropy, extension, and EICAR checks used by the TUI. Quarantine a finding directly from the results below.</p>
       <input id="path" placeholder="Path to scan, e.g. ~/Downloads or /tmp">
       <div class="actions"><button class="primary" onclick="scan()">Scan Path</button><button onclick="updateSigs()">Update & Check Versions</button><button onclick="refresh()">Refresh Status</button></div>
       <div id="scanOut" class="muted" style="margin-top:12px">Choose a folder or file and run a scan.</div>
@@ -587,6 +692,12 @@ footer{max-width:1220px;margin:0 auto;padding:0 18px 28px;color:var(--muted);fon
       <div class="actions"><button onclick="remember()">Remember Note</button></div>
       <div id="aiOut" class="muted" style="margin-top:12px">AI status will appear here.</div>
     </div>
+    <div class="panel wide view" data-view="dashboard history">
+      <h2>Quarantine History</h2>
+      <p class="muted">Every quarantined file, newest first. Restoring moves a file back to its original location; Aegis refuses to overwrite an existing file or restore the same record twice.</p>
+      <div class="actions"><button class="primary" onclick="history_()">Refresh History</button></div>
+      <div id="historyOut" class="muted" style="margin-top:12px">Press refresh to load quarantine history.</div>
+    </div>
     <div class="panel wide view" data-view="dashboard details">
       <div class="details-head"><h2>Details</h2><button onclick="copyDetails()">Copy JSON</button></div>
       <p class="muted">Raw output is kept here for debugging, support, or pasting into an issue. The panels above summarize what it means.</p>
@@ -605,13 +716,13 @@ footer{max-width:1220px;margin:0 auto;padding:0 18px 28px;color:var(--muted);fon
 document.getElementById('year').textContent=new Date().getFullYear();
 const $=id=>document.getElementById(id);
 let lastJSON='', currentView='dashboard';
-const views=['dashboard','scan','shield','network','audit','checkup','ai','details'];
+const views=['dashboard','scan','shield','network','audit','checkup','ai','history','details'];
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setDetails(name,obj){lastJSON=JSON.stringify(obj,null,2); $('detailsOut').textContent=name?name+'\n\n'+lastJSON:lastJSON}
 function copyDetails(){if(!lastJSON){return} navigator.clipboard?.writeText(lastJSON).then(()=>{$('detailsOut').textContent='Copied JSON to clipboard.\n\n'+lastJSON}).catch(()=>{$('detailsOut').focus();document.execCommand('selectAll');document.execCommand('copy')})}
 async function api(path,opts){const r=await fetch(path,opts); if(!r.ok) throw new Error(await r.text()); return r.json();}
 function initNav(){ $('nav').innerHTML=views.map(v=>'<button id="nav-'+v+'" onclick="showView(\''+v+'\')">'+label(v)+'</button>').join(''); showView(currentView)}
-function label(v){return {dashboard:'Dashboard',scan:'Scanner',shield:'Shield',network:'Network',audit:'Audit',checkup:'Checkup',ai:'AI',details:'Details'}[v]||v}
+function label(v){return {dashboard:'Dashboard',scan:'Scanner',shield:'Shield',network:'Network',audit:'Audit',checkup:'Checkup',ai:'AI',history:'History',details:'Details'}[v]||v}
 function showView(v){currentView=v; document.querySelectorAll('.view').forEach(el=>{const tags=el.dataset.view.split(' '); el.style.display=(v==='dashboard'||tags.includes(v))?'block':'none'}); views.forEach(x=>$('nav-'+x)?.classList.toggle('active',x===v))}
 async function refresh(){try{const s=await api('/api/status'); renderStatus(s); $('syncOut').textContent='synced '+new Date().toLocaleTimeString()}catch(e){$('cards').innerHTML='<div class="card bad">Status failed<br>'+esc(e.message)+'</div>'; $('syncOut').textContent='sync failed'}}
 async function startup(){try{const s=await api('/api/startup'); $('startupOut').innerHTML=s.running?'Checking for Aegis updates, refreshing signatures, and checking llama.cpp...':esc(s.summary||'Startup checks complete.'); if(!s.running) setDetails('Startup maintenance',s); if(!s.running) await refresh()}catch(e){$('startupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
@@ -626,7 +737,9 @@ function renderStatus(s){const fw=s.firewall?.enabled; $('cards').innerHTML=[
 function renderHealthWhy(s){$('healthWhy').style.display='grid'; const good=(s.health_good||[]).map(x=>'<li class="ok">'+esc(x)+'</li>').join('')||'<li class="muted">No strengths reported yet.</li>'; const issues=(s.health_issues||[]).map(x=>'<li class="warn">'+esc(x)+'</li>').join('')||'<li class="ok">No deductions right now.</li>'; $('healthWhy').innerHTML='<div><h2>What '+esc(s.health_score)+'% means</h2><p class="muted">'+esc(s.health_summary||'Protection score summarizes current local security posture.')+'</p></div><div><h2>Deductions</h2><ul class="list">'+issues+'</ul><h2 style="margin-top:14px">Working well</h2><ul class="list">'+good+'</ul></div>'}
 function card(k,v,n,cls){return '<div class="card"><b>'+esc(k)+'</b><div class="value '+(cls||'')+'">'+esc(v)+'</div><div class="muted">'+esc(n)+'</div></div>'}
 async function scan(){const path=$('path').value.trim()||undefined; $('scanOut').textContent='Scanning...'; try{const r=await api('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})}); $('scanOut').innerHTML=renderScan(r); setDetails('Scan result',r); await refresh()}catch(e){$('scanOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
-function renderScan(r){let html='<p><b>'+esc(r.scanned)+'</b> scanned · <b>'+esc(r.skipped)+'</b> skipped · '+esc(r.duration)+'</p>'; if(!r.threats?.length) return html+'<p class="ok">Clean. No signatures, rules, entropy, or ransomware patterns matched.</p>'; return html+r.threats.map(t=>'<div class="item"><span class="pill '+(t.severity==='CRITICAL'?'bad':'warn')+'">'+esc(t.severity)+'</span>'+esc(t.path)+'<br><span class="muted">'+esc(t.reason)+'</span></div>').join('')}
+let lastThreats=[];
+function renderScan(r){lastThreats=r.threats||[]; let html='<p><b>'+esc(r.scanned)+'</b> scanned · <b>'+esc(r.skipped)+'</b> skipped · '+esc(r.duration)+'</p>'; if(!lastThreats.length) return html+'<p class="ok">Clean. No signatures, rules, entropy, or ransomware patterns matched.</p>'; return html+lastThreats.map((t,i)=>'<div class="item" id="threat-'+i+'"><div class="details-head"><span><span class="pill '+(t.severity==='CRITICAL'?'bad':'warn')+'">'+esc(t.severity)+'</span>'+esc(t.path)+'</span><button onclick="quarantineItem(this,'+i+')">Quarantine</button></div><span class="muted">'+esc(t.reason)+'</span></div>').join('')}
+async function quarantineItem(btn,i){const t=lastThreats[i]; if(!t){return} btn.disabled=true; btn.textContent='Quarantining...'; try{const r=await api('/api/quarantine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:t.path,sha256:t.sha256,reason:t.reason,severity:t.severity})}); if(r.error){throw new Error(r.error)} setDetails('Quarantine',r); btn.textContent='Quarantined'; btn.closest('.item').style.opacity='0.6'}catch(e){btn.disabled=false; btn.textContent='Quarantine'; alert('Quarantine failed: '+e.message)}}
 async function updateSigs(){$('scanOut').textContent='Updating signatures and checking Aegis/llama.cpp releases...'; try{const r=await api('/api/update',{method:'POST'}); $('scanOut').innerHTML=r.error?'<span class="bad">'+esc(r.error)+'</span>':'<span class="ok">'+esc(r.summary||('Added '+r.added+' signatures; '+r.total+' total.'))+'</span>'; setDetails('Maintenance update',r); await refresh(); startup()}catch(e){$('scanOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function shield(action){$('shieldOut').textContent='Working...'; try{const r=await api('/api/shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})}); setDetails('Ransom shield '+action,r); const events=r.events||[]; if(action==='deploy') $('shieldOut').innerHTML='<span class="ok">Armed '+(r.canaries?.length||0)+' canary files.</span>'; else if(action==='cleanup') $('shieldOut').innerHTML='Removed '+esc(r.removed||0)+' canary files.'; else $('shieldOut').innerHTML=events.length?events.map(renderEvent).join(''):'<span class="ok">No ransomware canary or sweep alerts.</span>'; await refresh()}catch(e){$('shieldOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderEvent(e){return '<div class="item"><span class="pill bad">'+esc(e.severity||'ALERT')+'</span>'+esc(e.path)+'<br><span class="muted">'+esc(e.detail||e.kind)+'</span></div>'}
@@ -637,6 +750,15 @@ function renderCheckup(r){const checks=[...(r.updates||[]),...(r.dependencies||[
 async function aiStatus(){$('aiOut').textContent='Checking AI backend...'; try{const r=await api('/api/ai/status'); setDetails('AI status',r); const s=r.status||{}, ready=s.server_ready||s.cli_ready||s.remote_ready; $('aiOut').innerHTML='<p class="'+(ready?'ok':'warn')+'">'+(ready?'AI backend is ready.':'AI backend is not ready yet.')+'</p><p class="muted">'+esc(s.message||'No status message.')+'</p><p class="muted">Backend: '+esc(s.config?.backend||'unknown')+' · Privacy: '+esc(s.config?.privacy_mode||'metadata')+' · Notes: '+esc((r.notes||[]).length)+'</p>'}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function aiSetup(){$('aiOut').textContent='Building setup guide...'; try{const r=await api('/api/ai/setup'); setDetails('AI setup plan',r); $('aiOut').innerHTML='<p><b>What this does:</b> helps you install llama.cpp, choose a small Gemma GGUF model, start a local model server, and point Aegis at it.</p><p class="muted">Recommended: '+esc(r.recommended_model||'Gemma GGUF')+'</p><h3>Steps</h3><ol class="list">'+(r.commands||[]).map(c=>'<li>'+esc(c)+'</li>').join('')+'</ol>'}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function remember(){const text=$('note').value.trim(); if(!text){$('aiOut').innerHTML='<span class="warn">Write a note first.</span>'; return} try{const r=await api('/api/ai/remember',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}); $('note').value=''; $('aiOut').innerHTML='<span class="ok">Saved local context note. The AI will include recent notes when explaining findings.</span>'; setDetails('AI context notes',r)}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function history_(){$('historyOut').textContent='Loading quarantine history...'; try{const r=await api('/api/history'); setDetails('Quarantine history',r); renderHistory(r.quarantine||[])}catch(e){$('historyOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+function renderHistory(recs){if(!recs.length){$('historyOut').innerHTML='<span class="ok">Nothing has been quarantined yet.</span>'; return} $('historyOut').innerHTML=recs.map(r=>{
+  const id=esc(r.stored); const when=esc((r.when||'').replace('T',' ').slice(0,16));
+  const status=r.restored?'<span class="pill ok">RESTORED</span>':'<span class="pill warn">QUARANTINED</span>';
+  const action=r.restored?('<span class="muted small">restored '+esc((r.restored_at||'').replace('T',' ').slice(0,16))+'</span>')
+    :('<button onclick="restoreItem(this,\''+id.replace(/'/g,"\\'")+'\')">Restore</button>');
+  return '<div class="item"><div class="details-head">'+status+' '+esc(r.original)+action+'</div><span class="muted small">'+when+' · '+esc(r.reason)+'</span></div>';
+}).join('')}
+async function restoreItem(btn,id){btn.disabled=true; btn.textContent='Restoring...'; try{const r=await api('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); if(r.error){throw new Error(r.error)} setDetails('Restore',r); await history_()}catch(e){btn.disabled=false; btn.textContent='Restore'; alert('Restore failed: '+e.message)}}
 initNav(); refresh(); startup(); setTimeout(startup,2500); setInterval(refresh,4000);
 </script>
 </body>

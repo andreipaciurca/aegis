@@ -29,7 +29,7 @@ import (
 	"github.com/andreipaciurca/aegis/internal/signatures"
 )
 
-var Version = "1.2.3"
+var Version = "1.3.0"
 
 type tabID int
 
@@ -62,6 +62,14 @@ type quarMsg struct {
 	rec scanner.QuarantineRecord
 	err error
 	idx int
+}
+type quarHistoryMsg struct {
+	recs []scanner.QuarantineRecord
+	err  error
+}
+type restoreMsg struct {
+	rec scanner.QuarantineRecord
+	err error
 }
 type fwToggleMsg struct{ err error }
 type netTickMsg struct{}
@@ -129,6 +137,12 @@ type Model struct {
 	bar        progress.Model
 	spin       spinner.Model
 	sel        int
+
+	// quarantine history/restore, shown within the Scanner tab
+	quarantineView bool
+	quarHistory    []scanner.QuarantineRecord
+	quarSel        int
+	quarBusy       bool
 
 	// shield (ransomware)
 	canaryDirs   []string
@@ -305,6 +319,18 @@ func (m *Model) runUpdate() tea.Cmd {
 	}
 }
 
+func fetchQuarantineHistory() tea.Msg {
+	recs, err := scanner.QuarantineHistory()
+	return quarHistoryMsg{recs: recs, err: err}
+}
+
+func restoreQuarantine(id string) tea.Cmd {
+	return func() tea.Msg {
+		rec, err := scanner.Restore(id)
+		return restoreMsg{rec: rec, err: err}
+	}
+}
+
 func shieldCheck(dirs []string, live bool) tea.Cmd {
 	return func() tea.Msg {
 		return shieldMsg{events: ransom.Check(dirs), live: live}
@@ -452,7 +478,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.runUpdate(), m.spin.Tick)
 			}
 		case "r":
-			cmds = append(cmds, fetchFirewall, fetchNet, fetchAudit, fetchAIStatus)
+			cmds = append(cmds, fetchFirewall, fetchNet, fetchAudit, fetchAIStatus, fetchQuarantineHistory)
 		default:
 			cmds = append(cmds, m.tabKeys(msg)...)
 		}
@@ -622,6 +648,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.flash("quarantined → "+msg.rec.Stored, false)
 
+	case quarHistoryMsg:
+		m.quarBusy = false
+		if msg.err != nil {
+			return m, m.flash("quarantine history failed: "+msg.err.Error(), true)
+		}
+		m.quarHistory = msg.recs
+		if m.quarSel >= len(m.quarHistory) {
+			m.quarSel = 0
+		}
+		return m, nil
+
+	case restoreMsg:
+		m.quarBusy = false
+		if msg.err != nil {
+			return m, m.flash("restore failed: "+msg.err.Error(), true)
+		}
+		for i, r := range m.quarHistory {
+			if r.Stored == msg.rec.Stored {
+				m.quarHistory[i] = msg.rec
+				break
+			}
+		}
+		return m, m.flash("restored → "+msg.rec.Original, false)
+
 	case clearStatusMsg:
 		if msg.id == m.statusID {
 			m.status = ""
@@ -631,7 +681,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		if m.scanning || m.updating || m.fwWorking || m.shieldBusy || m.aiBusy {
+		if m.scanning || m.updating || m.fwWorking || m.shieldBusy || m.aiBusy || m.quarBusy {
 			return m, cmd
 		}
 		return m, nil
@@ -645,6 +695,31 @@ func (m *Model) tabKeys(msg tea.KeyMsg) []tea.Cmd {
 	var cmds []tea.Cmd
 	switch m.tab {
 	case tabScanner:
+		if m.quarantineView {
+			switch msg.String() {
+			case "v", "esc":
+				m.quarantineView = false
+			case "up", "k":
+				if m.quarSel > 0 {
+					m.quarSel--
+				}
+			case "down", "j":
+				if m.quarSel < len(m.quarHistory)-1 {
+					m.quarSel++
+				}
+			case "x":
+				if m.quarSel < len(m.quarHistory) {
+					r := m.quarHistory[m.quarSel]
+					if r.Restored {
+						cmds = append(cmds, m.flash("already restored", true))
+					} else {
+						m.quarBusy = true
+						cmds = append(cmds, restoreQuarantine(r.Stored), m.spin.Tick)
+					}
+				}
+			}
+			return cmds
+		}
 		switch msg.String() {
 		case "e", "p":
 			m.editing = true
@@ -659,6 +734,10 @@ func (m *Model) tabKeys(msg tea.KeyMsg) []tea.Cmd {
 				m.stopScan()
 				cmds = append(cmds, m.flash("scan cancelled", false))
 			}
+		case "v":
+			m.quarantineView = true
+			m.quarBusy = true
+			cmds = append(cmds, fetchQuarantineHistory, m.spin.Tick)
 		case "up", "k":
 			if m.sel > 0 {
 				m.sel--

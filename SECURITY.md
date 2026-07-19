@@ -53,9 +53,13 @@ or background service. It runs when invoked and exits when closed.
 
 Potentially sensitive actions are explicit:
 
-- quarantine moves a selected file into the aegis config directory and records a
-  JSON audit log
-- process termination requires user confirmation in the TUI
+- quarantine moves a selected file into the aegis config directory (permissions
+  stripped) and records a JSON audit log; `aegis restore` or the TUI/GUI can
+  reverse it, but restore refuses to run twice on the same record or to
+  overwrite a file that already exists at the original path
+- process termination requires user confirmation in the TUI, because unlike
+  quarantine it cannot be undone; it also refuses to target PID ≤ 1 or aegis
+  itself
 - firewall changes call native OS tools and report privilege requirements
 - local AI analysis is optional and uses local llama.cpp backends only
 - `aegis intel <hash>` is an explicit VirusTotal OSINT lookup; it sends only
@@ -63,6 +67,10 @@ Potentially sensitive actions are explicit:
 - `aegis clamav <path>` is explicit and sends file bytes only to the `clamd`
   address you choose; keep `clamd` bound to localhost or a trusted Unix socket
   unless you intentionally operate a private scanning service
+- the local browser GUI (`aegis gui`/`aegis app`) binds to `127.0.0.1` and
+  checks each API request's origin, rejecting anything that didn't come from
+  the page itself — a webpage open in another browser tab cannot silently
+  drive it while it's running
 
 Normal `scan`, `update`, `shield`, `audit`, `status`, TUI and GUI dashboard
 views do not upload files to external reputation services.

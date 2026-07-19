@@ -41,6 +41,7 @@ you without pretending to be a cloud EDR.
 - [Publishing a release](#publishing-a-release)
 - [Trust, signing and antivirus false positives](#trust-signing-and-antivirus-false-positives)
 - [Design notes](#design-notes)
+- [Contributing](#contributing)
 - [Honest limitations](#honest-limitations)
 - [Optional AI analyst](#optional-ai-analyst)
   - [Useful companion, not magic self-learning](#useful-companion-not-magic-self-learning)
@@ -92,15 +93,23 @@ local llama.cpp analyst.
   (a `.jpg` whose bytes aren't a JPEG and whose entropy is high = encrypted).
   Optional real-time monitor re-checks every 3 seconds.
 - **Persistence audit** — enumerates the autostart mechanisms malware abuses
-  to survive reboot (macOS LaunchAgents/Daemons, Linux systemd/cron/autostart,
-  Windows Run keys) and flags suspicious entries (temp-dir payloads, encoded
-  commands, download-and-run), each with the exact command to disable it.
+  to survive reboot: macOS LaunchAgents/LaunchDaemons, Linux systemd/cron/
+  autostart, and on Windows, registry Run/RunOnce keys, Scheduled Tasks
+  (filtered to non-Microsoft tasks — the OS ships hundreds of signed,
+  low-signal ones) and auto-start Services. Flags suspicious entries
+  (temp-dir payloads, encoded commands, download-and-run, and Windows
+  LOLBin patterns like `regsvr32 /i:`, `mshta`, `certutil -urlcache`), each
+  with the exact command to disable it.
 - **Actionable remediation** — every finding suggests a fix: **kill a
   process** (with a confirm prompt), **block a port** at the native firewall,
   or **disable an autostart** entry — with the precise command shown.
-- **One-key quarantine** — threats are moved to a locked-down quarantine
-  directory (`chmod 000`) with a JSON audit log; originals are never
-  silently deleted.
+- **One-key quarantine, with an undo** — threats are moved to a locked-down
+  quarantine directory (`chmod 000`) with a JSON audit log; originals are
+  never silently deleted. `aegis history` lists everything ever quarantined;
+  `aegis restore <id>` (or `v` in the TUI Scanner tab, or the GUI's History
+  panel) moves a file back if it turns out to be a false positive. Restore
+  refuses to run twice on the same record and refuses to overwrite a file
+  that already exists at the original path.
 - **Maintenance updates** — press `u` in the TUI/paired app to refresh
   signatures and check for newer Aegis and llama.cpp releases. Run
   `aegis update` when you only want the scriptable signature refresh from
@@ -110,7 +119,8 @@ local llama.cpp analyst.
   source provenance per hash; URLhaus-only matches are reported as review
   warnings because collected payloads are not always malicious. Rules live in
   `<config>/rules.json` and merge with the built-ins, so you can add detections
-  without recompiling. Everything works offline once fetched.
+  without recompiling — see [docs/rules.md](docs/rules.md) for the schema and
+  worked examples. Everything works offline once fetched.
 - **Optional OSINT enrichment** — `aegis intel <hash>` performs an explicit
   VirusTotal file reputation lookup for an MD5, SHA-1 or SHA-256. Normal scans
   never call VirusTotal and never upload files; the command sends only the hash
@@ -134,8 +144,10 @@ local llama.cpp analyst.
   headless with meaningful exit codes, ready for cron or CI.
 - **Browser GUI** — `aegis gui` starts a local-only web interface on
   `127.0.0.1` for people who are not comfortable with terminal workflows. It
-  exposes dashboard status, scans, signature updates, checkups and AI setup
-  without adding an Electron-style runtime.
+  exposes dashboard status, scans with one-click quarantine, quarantine
+  history with restore, signature updates, checkups and AI setup, without
+  adding an Electron-style runtime. Every API call is checked against the
+  request's origin, so a webpage open in another tab can't silently drive it.
 - **Paired mode** — `aegis app` launches the TUI and local browser GUI from one
   process so both surfaces talk to the same scanner, signature database, rules
   engine and checkup/AI setup code.
@@ -304,6 +316,8 @@ aegis update              # refresh malware signatures
 aegis status              # one-shot summary of every subsystem
 aegis intel <sha256>      # optional VirusTotal reputation lookup
 aegis clamav ~/Downloads  # optional local ClamAV daemon scan
+aegis history             # list everything ever quarantined
+aegis restore <id>        # undo a quarantine (false positive? this reverses it)
 ```
 
 ClamAV bridge:
@@ -321,6 +335,7 @@ aegis clamav ~/Downloads --addr tcp://127.0.0.1:3310 --json
 | `1`–`7` / `tab` | switch tabs (Dashboard · Scanner · Shield · Network · Firewall · Audit · AI) |
 | `u` | update signatures (any tab) |
 | `s` / `e` / `c` · `↑↓` + `x` | scan · edit path · cancel · select + quarantine (Scanner) |
+| `v` (in Scanner) | view quarantine history · `↑↓` select · `x` restore |
 | `d` / `c` / `s` / `m` | deploy canaries · clear · sweep now · real-time monitor (Shield) |
 | `↑↓` + `k` / `b` | select · kill process · block port (Network) |
 | `e` / `d` / `t` | enable · disable · stealth mode (Firewall) |
@@ -428,15 +443,28 @@ tools look much more suspicious to heuristic scanners.
   On low-power systems, set `AEGIS_SCAN_WORKERS=1` (or another value up to 8)
   to trade scan speed for lower CPU, memory and I/O pressure.
 - **Reliability:** the scanner treats unreadable files as skips, never fatal;
-  firewall, network and audit views degrade gracefully without root. Kill and
-  quarantine actions confirm first and refuse to touch PID ≤ 1 or aegis
-  itself. Unit tests cover the rule engine and the canary tamper detection.
+  firewall, network and audit views degrade gracefully without root. Killing a
+  process asks for confirmation first, because it can't be undone, and refuses
+  to touch PID ≤ 1 or aegis itself; quarantine doesn't need that gate because
+  it's reversible (`aegis restore`). Unit tests cover the rule engine, the
+  canary tamper detection, the quarantine/restore round trip, and the
+  persistence heuristics.
 - **Platforms:** macOS first (Application Firewall + pf + lsof + LaunchAgents),
   then Linux (ufw/nftables/iptables + lsof + systemd/cron), then Windows
-  (netsh + netstat + Run keys).
+  (netsh + netstat + registry Run keys, Scheduled Tasks and auto-start
+  Services).
 - Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and
   [Lip Gloss](https://github.com/charmbracelet/lipgloss); Catppuccin Mocha
   palette.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the `go vet && go test
+-race && gofmt -l .` check CI runs on every PR, and how to add a detection
+rule or a new persistence/checkup signal without breaking the design
+constraints ([no daemons, privacy-first opt-in](CONTRIBUTING.md#design-constraints-that-prs-should-respect))
+that make aegis trustworthy to run with elevated capabilities in the first
+place.
 
 ## Honest limitations
 

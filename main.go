@@ -14,6 +14,7 @@
 //	aegis gui        local browser GUI
 //	aegis app        TUI + local browser GUI together
 //	aegis history    list quarantine history
+//	aegis restore ID undo a quarantine (by stored path or hash)
 //	aegis update     refresh the signature database
 //	aegis status     one-shot security summary
 package main
@@ -99,6 +100,8 @@ func main() {
 			os.Exit(cliApp(db, eng, os.Args[2:]))
 		case "history":
 			os.Exit(cliHistory(os.Args[2:]))
+		case "restore":
+			os.Exit(cliRestore(os.Args[2:]))
 		case "update":
 			os.Exit(cliUpdate(db))
 		case "status":
@@ -140,6 +143,7 @@ advanced:
   clamav PATH           optional local ClamAV daemon scan
   analyze PATH          disk exposure summary
   history               quarantine history
+  restore ID            undo a quarantine (stored path or hash from history)
 
 try:
   aegis app
@@ -225,7 +229,15 @@ unexpectedly large folders before scanning.`)
 	case "history":
 		fmt.Println(`aegis history [--json]
 
-Shows quarantine history, newest first.`)
+Shows quarantine history, newest first. Each record's "stored" path is the ID
+to pass to aegis restore.`)
+	case "restore":
+		fmt.Println(`aegis restore <stored-path|sha256> [--json]
+
+Undoes a quarantine: moves the file back to its original location and marks
+the record as restored. Refuses to run twice on the same record and refuses
+to overwrite a file that already exists at the original path. Find the ID to
+pass with aegis history, or in the TUI Scanner tab (press v, then x).`)
 	case "update":
 		fmt.Println(`aegis update
 
@@ -687,9 +699,36 @@ func cliHistory(args []string) int {
 	}
 	fmt.Printf("%d quarantine record(s), newest first\n", len(recs))
 	for _, r := range recs {
-		fmt.Printf("  %s  %s\n     reason: %s\n     stored: %s\n",
-			r.When.Format("2006-01-02 15:04"), r.Original, r.Reason, r.Stored)
+		status := ""
+		if r.Restored {
+			status = "  [restored " + r.RestoredAt.Format("2006-01-02 15:04") + "]"
+		}
+		fmt.Printf("  %s  %s%s\n     reason: %s\n     stored: %s\n",
+			r.When.Format("2006-01-02 15:04"), r.Original, status, r.Reason, r.Stored)
 	}
+	return 0
+}
+
+func cliRestore(args []string) int {
+	args, jsonMode := splitJSON(args)
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: aegis restore <stored-path|sha256> [--json]")
+		return 2
+	}
+	rec, err := scanner.Restore(args[0])
+	if err != nil {
+		if jsonMode {
+			encodeJSON(map[string]any{"error": err.Error()})
+		} else {
+			fmt.Fprintln(os.Stderr, "restore:", err)
+		}
+		return 1
+	}
+	if jsonMode {
+		encodeJSON(rec)
+		return 0
+	}
+	fmt.Printf("restored %s\n", rec.Original)
 	return 0
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -458,11 +459,13 @@ func workerCount() int {
 
 // QuarantineRecord remembers where a quarantined file came from.
 type QuarantineRecord struct {
-	Original string    `json:"original"`
-	SHA256   string    `json:"sha256"`
-	Reason   string    `json:"reason"`
-	When     time.Time `json:"when"`
-	Stored   string    `json:"stored"`
+	Original   string     `json:"original"`
+	SHA256     string     `json:"sha256"`
+	Reason     string     `json:"reason"`
+	When       time.Time  `json:"when"`
+	Stored     string     `json:"stored"`
+	Restored   bool       `json:"restored,omitempty"`
+	RestoredAt *time.Time `json:"restored_at,omitempty"`
 }
 
 // Quarantine moves a file into the aegis quarantine directory, strips its
@@ -513,28 +516,18 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-func appendLog(qdir string, rec QuarantineRecord) error {
-	logPath := filepath.Join(qdir, "quarantine.json")
-	var recs []QuarantineRecord
-	if b, err := os.ReadFile(logPath); err == nil {
-		_ = json.Unmarshal(b, &recs)
-	}
-	recs = append(recs, rec)
-	b, err := json.MarshalIndent(recs, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(logPath, b, 0o600)
-}
-
-// QuarantineHistory returns recorded quarantine operations, newest first.
-func QuarantineHistory() ([]QuarantineRecord, error) {
+func quarantineDir() (string, error) {
 	dir, err := signatures.Dir()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	logPath := filepath.Join(dir, "quarantine", "quarantine.json")
-	b, err := os.ReadFile(logPath)
+	return filepath.Join(dir, "quarantine"), nil
+}
+
+func quarantineLogPath(qdir string) string { return filepath.Join(qdir, "quarantine.json") }
+
+func loadLog(qdir string) ([]QuarantineRecord, error) {
+	b, err := os.ReadFile(quarantineLogPath(qdir))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -545,8 +538,93 @@ func QuarantineHistory() ([]QuarantineRecord, error) {
 	if err := json.Unmarshal(b, &recs); err != nil {
 		return nil, err
 	}
+	return recs, nil
+}
+
+func saveLog(qdir string, recs []QuarantineRecord) error {
+	b, err := json.MarshalIndent(recs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(quarantineLogPath(qdir), b, 0o600)
+}
+
+func appendLog(qdir string, rec QuarantineRecord) error {
+	recs, err := loadLog(qdir)
+	if err != nil {
+		return err
+	}
+	recs = append(recs, rec)
+	return saveLog(qdir, recs)
+}
+
+// QuarantineHistory returns recorded quarantine operations, newest first.
+func QuarantineHistory() ([]QuarantineRecord, error) {
+	qdir, err := quarantineDir()
+	if err != nil {
+		return nil, err
+	}
+	recs, err := loadLog(qdir)
+	if err != nil {
+		return nil, err
+	}
 	for i, j := 0, len(recs)-1; i < j; i, j = i+1, j-1 {
 		recs[i], recs[j] = recs[j], recs[i]
 	}
 	return recs, nil
+}
+
+// Restore moves a quarantined file back to its original location and marks
+// the log record as restored. It identifies the record by its stored path
+// (as shown by QuarantineHistory/aegis history) or, if that doesn't match,
+// by SHA-256. It refuses to restore a record twice or to overwrite a file
+// that already exists at the original location.
+func Restore(idOrPath string) (QuarantineRecord, error) {
+	qdir, err := quarantineDir()
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	recs, err := loadLog(qdir)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	idx := -1
+	for i, r := range recs {
+		if r.Stored == idOrPath || (r.SHA256 != "" && strings.EqualFold(r.SHA256, idOrPath)) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return QuarantineRecord{}, fmt.Errorf("no quarantine record matches %q", idOrPath)
+	}
+	rec := recs[idx]
+	if rec.Restored {
+		return rec, fmt.Errorf("already restored on %s", rec.RestoredAt.Format(time.RFC3339))
+	}
+	if _, err := os.Stat(rec.Original); err == nil {
+		return rec, fmt.Errorf("refusing to overwrite existing file at %s", rec.Original)
+	}
+	if err := os.MkdirAll(filepath.Dir(rec.Original), 0o755); err != nil {
+		return rec, err
+	}
+	if err := os.Chmod(rec.Stored, 0o600); err != nil {
+		return rec, err
+	}
+	if err := os.Rename(rec.Stored, rec.Original); err != nil {
+		if err2 := copyFile(rec.Stored, rec.Original); err2 != nil {
+			return rec, err
+		}
+		if err2 := os.Remove(rec.Stored); err2 != nil {
+			return rec, err2
+		}
+	}
+	now := time.Now()
+	rec.Restored = true
+	rec.RestoredAt = &now
+	recs[idx] = rec
+	if err := saveLog(qdir, recs); err != nil {
+		return rec, err
+	}
+	return rec, nil
 }

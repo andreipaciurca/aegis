@@ -182,3 +182,73 @@ func TestWorkerCountEnvCap(t *testing.T) {
 		t.Fatalf("expected 2 workers, got %d", got)
 	}
 }
+
+func TestQuarantineAndRestoreRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	src := filepath.Join(home, "Downloads", "invoice.pdf.exe")
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("payload"))
+	threat := Threat{Path: src, SHA256: hex.EncodeToString(sum[:]), Reason: "test", Severity: SevCritical}
+
+	rec, err := Quarantine(threat)
+	if err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatal("original file should be gone after quarantine")
+	}
+	if _, err := os.Stat(rec.Stored); err != nil {
+		t.Fatalf("stored file missing: %v", err)
+	}
+
+	hist, err := QuarantineHistory()
+	if err != nil || len(hist) != 1 || hist[0].Restored {
+		t.Fatalf("expected one unrestored history entry, got %+v (err=%v)", hist, err)
+	}
+
+	restored, err := Restore(rec.Stored)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !restored.Restored || restored.RestoredAt == nil {
+		t.Fatalf("restore did not mark record as restored: %+v", restored)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("original file not restored: %v", err)
+	}
+	if _, err := os.Stat(rec.Stored); !os.IsNotExist(err) {
+		t.Fatal("quarantined copy should be gone after restore")
+	}
+
+	if _, err := Restore(rec.Stored); err == nil {
+		t.Fatal("expected error restoring an already-restored record")
+	}
+
+	// Restoring again onto an existing file must refuse to overwrite.
+	rec2, err := Quarantine(Threat{Path: writeTemp(t, filepath.Join(home, "Downloads", "again.exe"), "x"), Reason: "t", Severity: SevWarning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rec2.Original, []byte("someone recreated this"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(rec2.Stored); err == nil {
+		t.Fatal("expected restore to refuse overwriting an existing file")
+	}
+}
+
+func writeTemp(t *testing.T, path, content string) string {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
