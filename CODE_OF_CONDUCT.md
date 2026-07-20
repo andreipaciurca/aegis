@@ -1,5 +1,13 @@
 # Code of Conduct
 
+## Table of Contents
+
+- [The short version](#the-short-version)
+- [What that looks like](#what-that-looks-like)
+- [Scope](#scope)
+- [Enforcement](#enforcement)
+- [Attribution](#attribution)
+
 ## The short version
 
 Be respectful, assume good faith, and keep disagreements about the code, not

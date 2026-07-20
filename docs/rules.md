@@ -1,5 +1,13 @@
 # Writing aegis detection rules
 
+## Table of Contents
+
+- [Where the file goes](#where-the-file-goes)
+- [Schema](#schema)
+- [How conditions combine](#how-conditions-combine)
+- [Worked examples](#worked-examples)
+- [Testing a rule](#testing-a-rule)
+
 aegis's scanner runs a small YARA-inspired rule engine
 (`internal/rules/rules.go`) as one layer of its scan pipeline (see the
 "How a scan works" diagram in the [README](../README.md#architecture)). Rules

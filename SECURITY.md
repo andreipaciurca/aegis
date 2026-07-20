@@ -7,6 +7,7 @@
 - [False Positives](#false-positives)
 - [Trust Boundaries](#trust-boundaries)
 - [Release Integrity](#release-integrity)
+- [Security Automation](#security-automation)
 
 ## Supported Versions
 
@@ -85,3 +86,10 @@ Official releases should include:
 - code-signed macOS/Windows binaries, when platform certificates are available
 
 See [docs/RELEASE_SIGNING.md](docs/RELEASE_SIGNING.md).
+
+## Security Automation
+
+CodeQL, `govulncheck`, dependency review and release dry-run checks run in CI.
+For generated fixes, use GitHub CodeQL/Copilot Autofix or Dependabot to open a
+pull request, then wait for all checks and a maintainer review before merging.
+See [docs/SECURITY_AUTOFIX.md](docs/SECURITY_AUTOFIX.md).

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andreipaciurca/aegis/internal/rules"
 	"github.com/andreipaciurca/aegis/internal/signatures"
@@ -245,10 +246,58 @@ func TestQuarantineAndRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestQuarantineRejectsUnsafePathsAndIDs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	if _, err := Quarantine(Threat{Path: "bad\x00path", Reason: "test"}); err == nil {
+		t.Fatal("expected quarantine to reject a path containing NUL")
+	}
+
+	src := writeTemp(t, filepath.Join(home, "Downloads", "payload.exe"), "x")
+	if _, err := Quarantine(Threat{Path: src, SHA256: "../escape", Reason: "test"}); err == nil {
+		t.Fatal("expected quarantine to reject an unsafe supplied id")
+	}
+}
+
+func TestRestoreRejectsStoredPathOutsideQuarantine(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	qdir, err := quarantineDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := writeTemp(t, filepath.Join(home, "outside.quar"), "payload")
+	rec := QuarantineRecord{
+		Original: filepath.Join(home, "restore-target.exe"),
+		SHA256:   strings.Repeat("a", 64),
+		Reason:   "test",
+		When:     nowForTest(),
+		Stored:   outside,
+	}
+	if err := saveLog(qdir, []QuarantineRecord{rec}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(rec.SHA256); err == nil || !strings.Contains(err.Error(), "outside quarantine directory") {
+		t.Fatalf("expected outside-quarantine restore refusal, got %v", err)
+	}
+}
+
 func writeTemp(t *testing.T, path, content string) string {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
+
+func nowForTest() time.Time { return time.Unix(1, 0).UTC() }

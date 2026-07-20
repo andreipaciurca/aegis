@@ -223,7 +223,7 @@ Checks OS/dependency update signals and recent CISA KEV/NVD vulnerability feeds.
 Use --offline to skip online vulnerability feeds.`)
 	case "ai":
 		fmt.Println(`aegis ai status
-aegis ai setup [--download-llama]
+aegis ai setup [--download-llama] [--json]
 aegis ai config --backend llamacpp-server --endpoint URL
 aegis ai test [prompt]
 aegis ai chat
@@ -851,19 +851,79 @@ func cliAI(args []string) int {
 }
 
 func cliAISetup(args ...string) int {
+	args, jsonMode := splitJSON(args)
 	opts := ai.SetupOptions{}
 	for _, a := range args {
 		if a == "--download-llama" {
 			opts.DownloadLlama = true
+			continue
 		}
+		fmt.Fprintln(os.Stderr, "usage: aegis ai setup [--download-llama] [--json]")
+		return 2
 	}
 	plan, err := ai.RunSetup(opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ai setup:", err)
 		return 1
 	}
-	encodeJSON(plan)
+	if jsonMode {
+		encodeJSON(plan)
+		return 0
+	}
+	printAISetupPlan(plan)
 	return 0
+}
+
+func printAISetupPlan(plan ai.SetupPlan) {
+	colors := newCLIColors()
+	fmt.Println(colors.Blue("Aegis local AI setup"))
+	fmt.Println()
+	fmt.Printf("Install dir: %s\n", plan.InstallDir)
+	fmt.Printf("Model dir:   %s\n", plan.ModelDir)
+	fmt.Printf("Recommended: %s\n", plan.Recommended)
+	fmt.Printf("llama.cpp:   %s\n", plan.LlamaReleaseURL)
+	fmt.Println()
+	if len(plan.ModelSources) > 0 {
+		fmt.Println(colors.Bold("Model downloads"))
+		for _, src := range plan.ModelSources {
+			fmt.Printf("- %s\n  %s\n  ref: %s\n  note: %s\n", src.Name, src.URL, src.Ref, src.Note)
+		}
+		fmt.Println()
+	}
+	for _, section := range plan.Sections {
+		fmt.Println(colors.Bold(section.Title))
+		if section.Why != "" {
+			fmt.Println(section.Why)
+		}
+		for _, cmd := range section.Commands {
+			fmt.Printf("\n%s\n", colors.Blue(cmd.Label))
+			if cmd.Unix != "" {
+				fmt.Println("macOS/Linux/Unix:")
+				printCommandBlock(cmd.Unix)
+			}
+			if cmd.PowerShell != "" {
+				fmt.Println("Windows PowerShell:")
+				printCommandBlock(cmd.PowerShell)
+			}
+			if cmd.Cmd != "" {
+				fmt.Println("Windows cmd.exe fallback:")
+				printCommandBlock(cmd.Cmd)
+			}
+		}
+		fmt.Println()
+	}
+	if len(plan.Notes) > 0 {
+		fmt.Println(colors.Bold("Notes"))
+		for _, note := range plan.Notes {
+			fmt.Println("- " + note)
+		}
+	}
+}
+
+func printCommandBlock(cmd string) {
+	for _, line := range strings.Split(cmd, "\n") {
+		fmt.Println("  " + line)
+	}
 }
 
 func cliCheckup(args []string) int {
@@ -1721,17 +1781,17 @@ func printAIThreatExplanations(threats []scanner.Threat) {
 		out, err := ai.Generate(ctx, cfg, ai.Request{System: ai.PromptWithNotes(ai.SecuritySystemPrompt()), Prompt: prompt})
 		cancel()
 		if err != nil {
-			fmt.Printf("  %s: AI unavailable: %v\n", t.Path, err)
+			fmt.Printf("  %s: AI unavailable; run `aegis ai status` for setup details.\n", aiDisplayPath(t.Path))
 			continue
 		}
-		fmt.Printf("\n[%s] %s\n%s\n", t.Severity, t.Path, out)
+		fmt.Printf("\n[%s] %s\n%s\n", t.Severity, aiDisplayPath(t.Path), out)
 	}
 }
 
 func threatPrompt(t scanner.Threat, cfg ai.Config) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Aegis flagged this file. Assess likely risk and false-positive likelihood.\n")
-	fmt.Fprintf(&b, "Path: %s\nSeverity: %s\nReason: %s\nSize: %d\nSHA256: %s\n", t.Path, t.Severity, t.Reason, t.Size, t.SHA256)
+	fmt.Fprintf(&b, "File: %s\nSeverity: %s\nReason: %s\nSize: %d\nSHA256: %s\n", aiDisplayPath(t.Path), t.Severity, t.Reason, t.Size, t.SHA256)
 	if cfg.PrivacyMode == "excerpt" {
 		if ex := safeExcerpt(t.Path, cfg.MaxExcerptBytes); ex != "" {
 			fmt.Fprintf(&b, "\nSmall printable excerpt:\n%s\n", ex)
@@ -1743,7 +1803,25 @@ func threatPrompt(t scanner.Threat, cfg ai.Config) string {
 	return b.String()
 }
 
+func aiDisplayPath(path string) string {
+	base := filepath.Base(filepath.Clean(path))
+	if base == "." || base == string(filepath.Separator) {
+		return "[redacted path]"
+	}
+	return base
+}
+
 func safeExcerpt(path string, maxBytes int) string {
+	if maxBytes <= 0 || strings.ContainsRune(path, 0) {
+		return ""
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	// codeql[go/path-injection]
+	// Optional AI excerpts only read a scanner finding
+	// path after rejecting NUL bytes, non-positive caps and non-regular files.
 	f, err := os.Open(path)
 	if err != nil {
 		return ""

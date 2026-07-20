@@ -525,13 +525,17 @@ next steps.
 Start with the setup plan:
 
 ```sh
-# Prints install paths, current llama.cpp release info and recommended commands.
+# Prints an idempotent, OS-aware guide with macOS/Linux/Unix,
+# PowerShell and cmd.exe commands.
 aegis ai setup
 
 # Optional: download and extract the latest matching llama.cpp release asset.
 # The asset is selected at runtime for macOS/Linux/Windows and its sha256 digest
 # is verified when GitHub publishes one.
 aegis ai setup --download-llama
+
+# Machine-readable form used by the GUI.
+aegis ai setup --json
 ```
 
 Two llama.cpp modes are supported:
@@ -541,14 +545,38 @@ Two llama.cpp modes are supported:
 - **CLI mode** — let aegis call `llama-cli` with a local `.gguf` model file.
 
 ```sh
-# Option A: llama-server, recommended for chat and repeated triage
-llama-server -m ~/.config/aegis/models/gemma.gguf --host 127.0.0.1 --port 8080
+# Option A: llama-server, recommended for chat and repeated triage.
+# Fastest path: llama.cpp downloads the GGUF from Hugging Face into its cache.
+llama-server -hf lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M --host 127.0.0.1 --port 8080
 aegis ai config --backend llamacpp-server --endpoint http://127.0.0.1:8080/v1/chat/completions
 
-# Option B: direct subprocess
-aegis ai config --backend llamacpp-cli --model ~/.config/aegis/models/gemma.gguf --command llama-cli
+# Option B: manual model folder, macOS.
+export AEGIS_MODEL_DIR="$HOME/Library/Application Support/aegis/models"
+mkdir -p "$AEGIS_MODEL_DIR"
+python -m pip install -U huggingface_hub
+huggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF \
+  gemma-4-E4B-it-Q4_K_M.gguf \
+  --local-dir "$AEGIS_MODEL_DIR" \
+  --local-dir-use-symlinks False
+llama-server -m "$AEGIS_MODEL_DIR/gemma-4-E4B-it-Q4_K_M.gguf" --host 127.0.0.1 --port 8080
 
-# Option C: explicit remote API, useful when the user accepts cloud processing.
+# Option C: manual model folder, Linux/Unix.
+export AEGIS_MODEL_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/aegis/models"
+mkdir -p "$AEGIS_MODEL_DIR"
+
+# Option D: Windows PowerShell.
+$env:AEGIS_MODEL_DIR = Join-Path $env:LOCALAPPDATA 'aegis\models'
+New-Item -ItemType Directory -Force -Path $env:AEGIS_MODEL_DIR | Out-Null
+
+# Option E: Windows cmd.exe fallback.
+set "AEGIS_MODEL_DIR=%LOCALAPPDATA%\aegis\models"
+if not exist "%AEGIS_MODEL_DIR%" mkdir "%AEGIS_MODEL_DIR%"
+
+# After setting AEGIS_MODEL_DIR on your OS, use direct subprocess mode
+# when you prefer llama-cli instead of llama-server.
+aegis ai config --backend llamacpp-cli --model "$AEGIS_MODEL_DIR/gemma-4-E4B-it-Q4_K_M.gguf" --command llama-cli
+
+# Option F: explicit remote API, useful when the user accepts cloud processing.
 # The OpenAI-compatible model is configurable.
 export OPENAI_API_KEY=...
 aegis ai config --backend openai-compatible \
@@ -566,6 +594,21 @@ aegis ai context
 # Ask the model to triage scan findings
 aegis scan ~/Downloads --ai
 ```
+
+Recommended model sources:
+
+- Gemma 4 E4B instruct GGUF:
+  <https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF>
+  (`lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M`)
+- Gemma 3 4B instruct GGUF fallback:
+  <https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF>
+  (`bartowski/google_gemma-3-4b-it-GGUF:Q4_K_M`)
+- Google Gemma 2B instruct GGUF smallest fallback:
+  <https://huggingface.co/google/gemma-2b-it-GGUF>
+
+Review each model card and license before operational use. For locked-down
+environments, download the chosen `.gguf`, record its checksum, and configure
+Aegis with the pinned local path.
 
 Hosted models can be connected today if they are exposed through an
 OpenAI-compatible gateway. Native provider-specific or MCP adapters are feasible

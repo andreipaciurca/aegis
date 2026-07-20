@@ -684,9 +684,10 @@ aegis scan /tmp</span></code></div>
     <div class="panes">
       <div class="pane">
         <span class="pane-title">guided setup</span>
-        <p><code>aegis ai setup</code> queries the latest llama.cpp release at
-        runtime, recommends a small Gemma GGUF, and can download/extract the
-        matching macOS, Linux or Windows asset with checksum verification.</p>
+        <p><code>aegis ai setup</code> prints an idempotent guide for macOS,
+        Linux/Unix, PowerShell and cmd.exe. It says where llama.cpp comes from,
+        which Gemma GGUF to try first, and what fallback model sources to use.</p>
+        <code class="demo">aegis ai setup</code>
         <code class="demo">aegis ai setup --download-llama</code>
       </div>
       <div class="pane">

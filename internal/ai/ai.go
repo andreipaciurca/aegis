@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -49,12 +50,38 @@ type Status struct {
 }
 
 type SetupPlan struct {
-	InstallDir      string   `json:"install_dir"`
-	ModelDir        string   `json:"model_dir"`
-	Recommended     string   `json:"recommended_model"`
-	LlamaReleaseURL string   `json:"llama_release_url"`
-	Notes           []string `json:"notes"`
-	Commands        []string `json:"commands"`
+	InstallDir      string         `json:"install_dir"`
+	ModelDir        string         `json:"model_dir"`
+	ModelFile       string         `json:"model_file"`
+	Recommended     string         `json:"recommended_model"`
+	LlamaReleaseURL string         `json:"llama_release_url"`
+	ModelSources    []ModelSource  `json:"model_sources"`
+	Sections        []SetupSection `json:"sections"`
+	Notes           []string       `json:"notes"`
+	Commands        []string       `json:"commands"`
+	LegacyCommands  []string       `json:"legacy_commands,omitempty"`
+	Idempotent      bool           `json:"idempotent"`
+}
+
+type ModelSource struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Ref      string `json:"ref"`
+	Filename string `json:"filename,omitempty"`
+	Note     string `json:"note"`
+}
+
+type SetupSection struct {
+	Title    string         `json:"title"`
+	Why      string         `json:"why"`
+	Commands []SetupCommand `json:"commands"`
+}
+
+type SetupCommand struct {
+	Label      string `json:"label"`
+	Unix       string `json:"unix,omitempty"`
+	PowerShell string `json:"powershell,omitempty"`
+	Cmd        string `json:"cmd,omitempty"`
 }
 
 type Request struct {
@@ -253,14 +280,104 @@ func PlanSetup() (SetupPlan, error) {
 	modelDir := filepath.Join(dir, "models")
 	installDir := filepath.Join(dir, "llama.cpp")
 	homeModel := filepath.Join(modelDir, "gemma.gguf")
+	modelSources := []ModelSource{
+		{
+			Name:     "Gemma 4 E4B instruct GGUF",
+			URL:      "https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF",
+			Ref:      "lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M",
+			Filename: "gemma-4-E4B-it-Q4_K_M.gguf",
+			Note:     "Recommended first try on modern laptops/desktops: small, instruction-tuned, and available as Q4_K_M GGUF.",
+		},
+		{
+			Name:     "Gemma 3 4B instruct GGUF",
+			URL:      "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF",
+			Ref:      "bartowski/google_gemma-3-4b-it-GGUF:Q4_K_M",
+			Filename: "google_gemma-3-4b-it-Q4_K_M.gguf",
+			Note:     "Fallback if the latest Gemma 4 GGUF is too new for your llama.cpp build.",
+		},
+		{
+			Name:     "Google Gemma 2B instruct GGUF",
+			URL:      "https://huggingface.co/google/gemma-2b-it-GGUF",
+			Ref:      "google/gemma-2b-it-GGUF",
+			Filename: "gemma-2b-it.gguf",
+			Note:     "Smallest fallback from Google; check the model card and license before operational use.",
+		},
+	}
+	sections := []SetupSection{
+		{
+			Title: "1. Create the model folder",
+			Why:   "Safe to run again. It creates the Aegis model directory for the current user without hardcoding a username.",
+			Commands: []SetupCommand{{
+				Label:      "Create directory",
+				Unix:       unixModelDirCommand(runtime.GOOS) + "\nmkdir -p \"$AEGIS_MODEL_DIR\"",
+				PowerShell: "$env:AEGIS_MODEL_DIR = Join-Path $env:LOCALAPPDATA 'aegis\\models'\nNew-Item -ItemType Directory -Force -Path $env:AEGIS_MODEL_DIR | Out-Null",
+				Cmd:        "set \"AEGIS_MODEL_DIR=%LOCALAPPDATA%\\aegis\\models\"\nif not exist \"%AEGIS_MODEL_DIR%\" mkdir \"%AEGIS_MODEL_DIR%\"",
+			}},
+		},
+		{
+			Title: "2. Install or update llama.cpp",
+			Why:   "Aegis queries the latest ggml-org/llama.cpp release and downloads the matching macOS, Linux, or Windows asset.",
+			Commands: []SetupCommand{{
+				Label:      "Aegis managed",
+				Unix:       "aegis ai setup --download-llama",
+				PowerShell: "aegis ai setup --download-llama",
+				Cmd:        "aegis ai setup --download-llama",
+			}, {
+				Label:      "Source fallback",
+				Unix:       "git clone https://github.com/ggml-org/llama.cpp \"$HOME/src/llama.cpp\"\ncmake -S \"$HOME/src/llama.cpp\" -B \"$HOME/src/llama.cpp/build\"\ncmake --build \"$HOME/src/llama.cpp/build\" --config Release",
+				PowerShell: "git clone https://github.com/ggml-org/llama.cpp \"$env:USERPROFILE\\src\\llama.cpp\"\ncmake -S \"$env:USERPROFILE\\src\\llama.cpp\" -B \"$env:USERPROFILE\\src\\llama.cpp\\build\"\ncmake --build \"$env:USERPROFILE\\src\\llama.cpp\\build\" --config Release",
+				Cmd:        "git clone https://github.com/ggml-org/llama.cpp \"%USERPROFILE%\\src\\llama.cpp\"\ncmake -S \"%USERPROFILE%\\src\\llama.cpp\" -B \"%USERPROFILE%\\src\\llama.cpp\\build\"\ncmake --build \"%USERPROFILE%\\src\\llama.cpp\\build\" --config Release",
+			}},
+		},
+		{
+			Title: "3. Download a model",
+			Why:   "Fastest path uses llama.cpp's Hugging Face loader. Manual fallback stores a GGUF file in the Aegis model folder.",
+			Commands: []SetupCommand{{
+				Label:      "Auto-download via llama.cpp",
+				Unix:       "llama-server -hf " + modelSources[0].Ref + " --host 127.0.0.1 --port 8080",
+				PowerShell: "llama-server -hf " + modelSources[0].Ref + " --host 127.0.0.1 --port 8080",
+				Cmd:        "llama-server -hf " + modelSources[0].Ref + " --host 127.0.0.1 --port 8080",
+			}, {
+				Label:      "Manual Hugging Face fallback",
+				Unix:       "python -m pip install -U huggingface_hub\nhuggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF " + modelSources[0].Filename + " --local-dir \"$AEGIS_MODEL_DIR\" --local-dir-use-symlinks False",
+				PowerShell: "python -m pip install -U huggingface_hub\nhuggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF " + modelSources[0].Filename + " --local-dir \"$env:AEGIS_MODEL_DIR\" --local-dir-use-symlinks False",
+				Cmd:        "python -m pip install -U huggingface_hub\nhuggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF " + modelSources[0].Filename + " --local-dir \"%AEGIS_MODEL_DIR%\" --local-dir-use-symlinks False",
+			}},
+		},
+		{
+			Title: "4. Start the local server",
+			Why:   "Runs only on 127.0.0.1 so findings and host context stay on this machine.",
+			Commands: []SetupCommand{{
+				Label:      "If you downloaded a GGUF file manually",
+				Unix:       "llama-server -m \"$AEGIS_MODEL_DIR/" + modelSources[0].Filename + "\" --host 127.0.0.1 --port 8080",
+				PowerShell: "llama-server -m \"$env:AEGIS_MODEL_DIR\\" + modelSources[0].Filename + "\" --host 127.0.0.1 --port 8080",
+				Cmd:        "llama-server -m \"%AEGIS_MODEL_DIR%\\" + modelSources[0].Filename + "\" --host 127.0.0.1 --port 8080",
+			}},
+		},
+		{
+			Title: "5. Point Aegis at the server",
+			Why:   "Safe to run again. It updates Aegis AI config to use the local OpenAI-compatible llama.cpp endpoint.",
+			Commands: []SetupCommand{{
+				Label:      "Configure and verify",
+				Unix:       "aegis ai config --backend llamacpp-server --endpoint " + DefaultURL + "\naegis ai status\naegis ai test \"Explain what Aegis checks\"",
+				PowerShell: "aegis ai config --backend llamacpp-server --endpoint " + DefaultURL + "\naegis ai status\naegis ai test \"Explain what Aegis checks\"",
+				Cmd:        "aegis ai config --backend llamacpp-server --endpoint " + DefaultURL + "\naegis ai status\naegis ai test \"Explain what Aegis checks\"",
+			}},
+		},
+	}
 	return SetupPlan{
 		InstallDir:      installDir,
 		ModelDir:        modelDir,
-		Recommended:     "Gemma 3 or Gemma 2 instruction-tuned GGUF, 2B-4B, Q4_K_M quantization",
+		ModelFile:       homeModel,
+		Recommended:     "Gemma 4 E4B or Gemma 3 4B instruction-tuned GGUF, Q4_K_M quantization",
 		LlamaReleaseURL: "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
+		ModelSources:    modelSources,
+		Sections:        sections,
+		Idempotent:      true,
 		Notes: []string{
 			"aegis queries llama.cpp releases at setup time so it can use the current build instead of a hardcoded tag",
-			"model weights are separate; download GGUF files only from sources you trust and pin checksums for operational use",
+			"setup commands are idempotent for the current user on macOS, Linux/Unix and Windows; they avoid hardcoded usernames",
+			"model weights are separate; download GGUF files only from sources you trust, review the model card/license and pin checksums for operational use",
 			"local llama.cpp remains the default privacy-preserving path; remote API backends are opt-in",
 		},
 		Commands: []string{
@@ -271,6 +388,13 @@ func PlanSetup() (SetupPlan, error) {
 			"aegis ai status",
 		},
 	}, nil
+}
+
+func unixModelDirCommand(goos string) string {
+	if goos == "darwin" {
+		return "export AEGIS_MODEL_DIR=\"$HOME/Library/Application Support/aegis/models\""
+	}
+	return "export AEGIS_MODEL_DIR=\"${XDG_CONFIG_HOME:-$HOME/.config}/aegis/models\""
 }
 
 func configPath() (string, error) {

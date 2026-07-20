@@ -1,7 +1,9 @@
 package ai
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,5 +109,49 @@ func TestAddNoteAndNotesRoundTrip(t *testing.T) {
 	prompt := PromptWithNotes("system prompt")
 	if prompt == "system prompt" {
 		t.Fatal("expected PromptWithNotes to append remembered context")
+	}
+}
+
+func TestPlanSetupIsPortableAndActionable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	plan, err := PlanSetup()
+	if err != nil {
+		t.Fatalf("PlanSetup: %v", err)
+	}
+	if !plan.Idempotent {
+		t.Fatal("setup plan should explicitly report that commands are idempotent")
+	}
+	if plan.ModelDir == "" || plan.InstallDir == "" || plan.ModelFile == "" {
+		t.Fatalf("expected resolved install/model paths, got %+v", plan)
+	}
+	if len(plan.ModelSources) < 3 {
+		t.Fatalf("expected recommended model plus fallbacks, got %+v", plan.ModelSources)
+	}
+	if len(plan.Sections) < 5 {
+		t.Fatalf("expected step-by-step sections, got %d", len(plan.Sections))
+	}
+
+	blob, err := json.Marshal(plan.Sections)
+	if err != nil {
+		t.Fatalf("marshal sections: %v", err)
+	}
+	text := string(blob)
+	for _, want := range []string{
+		"AEGIS_MODEL_DIR",
+		"%LOCALAPPDATA%",
+		"$env:LOCALAPPDATA",
+		"llama-server -hf",
+		"aegis ai setup --download-llama",
+		"aegis ai config --backend llamacpp-server",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("setup plan missing %q in sections: %s", want, text)
+		}
+	}
+	if strings.Contains(text, home) || strings.Contains(text, "/Users/") {
+		t.Fatalf("copy-paste commands should avoid hardcoded user paths: %s", text)
 	}
 }
