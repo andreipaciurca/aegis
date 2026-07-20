@@ -6,10 +6,10 @@ aegis means Adaptive Endpoint Guard for Internet Safety.
 Attribution and Inspiration
 ---------------------------
 
-This project is inspired by practical terminal-first developer tools, including
-tw93/mole's approachable command-line ergonomics, and by public defensive
-security practices around signatures, ransomware canaries, OS posture checks,
-local-first tooling, and transparent release verification.
+This project takes cues from practical terminal-first developer tools,
+including tw93/mole's approachable command-line ergonomics. It also draws on
+public defensive security practices: signatures, ransomware canaries, OS
+posture checks, local-first tooling, and transparent release verification.
 
 Redistributed copies and modified versions should keep this notice or an
 equivalent attribution that credits the original aegis project and links to:
