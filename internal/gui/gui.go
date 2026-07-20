@@ -721,7 +721,7 @@ const indexHTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>aegis — GUI</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23cba6f7' d='M12 2 21 5.5v6.3c0 5.6-3.5 9.6-9 10.7-5.5-1.1-9-5.1-9-10.7V5.5Z'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2311111b'/%3E%3Cpath fill='%23cba6f7' d='M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z'/%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;--bg:#11111b;--panel:#1e1e2e;--panel2:#181825;--line:#313244;--line2:#45475a;--text:#cdd6f4;--muted:#9399b2;--faint:#6c7086;--accent:#cba6f7;--ink:#11111b;--green:#a6e3a1;--red:#f38ba8;--yellow:#f9e2af;--blue:#89b4fa}
 *{box-sizing:border-box}

@@ -1,3 +1,8 @@
+<table align="center">
+<tr><td align="center">
+
+<img src="docs/favicon.svg" width="72" height="72" alt="aegis logo">
+
 # aegis
 
 [![CI](https://github.com/andreipaciurca/aegis/actions/workflows/ci.yml/badge.svg)](https://github.com/andreipaciurca/aegis/actions/workflows/ci.yml)
@@ -7,6 +12,9 @@
 [![Latest release](https://img.shields.io/github/v/release/andreipaciurca/aegis?include_prereleases)](https://github.com/andreipaciurca/aegis/releases)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-a6e3a1)](LICENSE)
 [![Repo](https://img.shields.io/badge/source-GitHub-89b4fa)](https://github.com/andreipaciurca/aegis)
+
+</td></tr>
+</table>
 
 A fast, minimal internet-security app for the terminal and browser: **malware &
 ransomware detection**, **firewall control**, **network monitoring** and a
