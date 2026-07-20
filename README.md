@@ -112,7 +112,7 @@ local llama.cpp analyst.
   that already exists at the original path.
 - **Maintenance updates** — press `u` in the TUI/paired app, click **Update &
   Check Versions** in the GUI, or run `aegis update` from a script (add
-  `--json` for machine-readable output) — all three refresh signatures *and*
+  `--json` for machine-readable output). All three refresh signatures *and*
   check for newer Aegis and llama.cpp releases; none of them self-replace the
   binary. Signatures come from multiple abuse.ch sources: high-confidence
   [MalwareBazaar](https://bazaar.abuse.ch/) sample hashes and medium-confidence
@@ -132,8 +132,8 @@ local llama.cpp analyst.
   signature databases inside aegis.
 - **Startup maintenance** — when the TUI, GUI or paired app starts, aegis
   refreshes the malware-hash database, checks whether a newer aegis release is
-  published, and checks the latest llama.cpp release. It reports binary/model
-  updates but does not silently replace executables or model files.
+  published, and checks the latest llama.cpp release. It just reports what it
+  finds; nothing gets replaced automatically.
 - **Firewall panel** — reads and toggles the *native* OS firewall rather
   than reinventing one: macOS Application Firewall (+ pf status, stealth
   mode), Linux ufw/nftables/iptables, Windows Defender Firewall. If aegis
@@ -144,7 +144,7 @@ local llama.cpp analyst.
 - **Scriptable** — `scan`/`shield`/`audit`/`update`/`status` subcommands run
   headless with meaningful exit codes, ready for cron or CI.
 - **Browser GUI** — `aegis gui` starts a local-only web interface on
-  `127.0.0.1` for people who are not comfortable with terminal workflows. A
+  `127.0.0.1` for people who'd rather skip the terminal. A
   single dashboard view leads with the protection score and summary cards;
   Scanner, Shield, Network, **Firewall**, Audit, Checkup, AI and Quarantine
   History are each their own tab, matching the TUI one panel at a time
@@ -367,10 +367,10 @@ aegis clamav ~/Downloads --addr tcp://127.0.0.1:3310 --json
 - **Manual update:** press `u` in the TUI/paired app, use the GUI
   **Update & Check Versions** button, or run `aegis update` (add `--json` for
   scripts) — all three do the same thing: refresh signatures and check
-  whether a newer aegis or llama.cpp release is available, and unlike the
+  whether a newer aegis or llama.cpp release is available. Unlike the
   automatic startup check, these are never throttled — they're always live.
   For automation: `crontab -e` → `0 9 * * * /usr/local/bin/aegis update`.
-- **The app:** it is one static binary, and aegis never silently replaces it.
+- **The app:** it's one static binary, and aegis never silently replaces it.
   `aegis update` (or the checks above) will tell you a newer release exists
   and print its URL — then `git pull && make install`, re-run the
   [install script](#release-installer) (which doubles as an updater), or drop
@@ -459,9 +459,9 @@ tools look much more suspicious to heuristic scanners.
   (caches, `node_modules`, `.git`). Ransomware canaries are polled, not
   watched with a kernel inotify tree, so protection stays nearly free.
   On low-power systems, set `AEGIS_SCAN_WORKERS=1` (or another value up to 8)
-  to trade scan speed for lower CPU, memory and I/O pressure. Automatic
-  startup checks are cached for 30 minutes by default
-  (`AEGIS_STARTUP_CHECK_INTERVAL`) so they cost nothing on repeat launches.
+  to trade scan speed for lower CPU, memory and I/O pressure. Startup checks
+  are cached too (`AEGIS_STARTUP_CHECK_INTERVAL`), so repeat launches cost
+  nothing.
 - **Reliability:** the scanner treats unreadable files as skips, never fatal;
   firewall, network and audit views degrade gracefully without root. Killing a
   process asks for confirmation first, because it can't be undone, and refuses
@@ -481,14 +481,14 @@ tools look much more suspicious to heuristic scanners.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, the `go vet && go test
 -race && gofmt -l .` check CI runs on every PR, and how to add a detection
-rule or a new persistence/checkup signal without breaking the design
-constraints ([no daemons, privacy-first opt-in](CONTRIBUTING.md#design-constraints-that-prs-should-respect))
-that make aegis trustworthy to run with elevated capabilities in the first
-place.
+rule or a new persistence/checkup signal. Stick to the design constraints
+([no daemons, privacy-first opt-in](CONTRIBUTING.md#design-constraints-that-prs-should-respect))
+— they're what let aegis run with elevated capabilities and still be
+trustworthy.
 
 ## Honest limitations
 
-aegis is a genuinely capable lightweight tool, but it is **not** a drop-in
+aegis is a capable lightweight tool, but it is **not** a drop-in
 replacement for Bitdefender or Kaspersky — those run kernel drivers, cloud ML
 and paid threat-research teams. Keep Gatekeeper/XProtect or Defender enabled
 alongside it. Signature matching catches *known* samples; the rule engine,
@@ -618,12 +618,12 @@ depend on operationally.
 
 ### Online vulnerability context
 
-`aegis checkup` already pulls public vulnerability context from CISA KEV and
-NVD when online, and can run `--offline` when network access is not desired.
-That is the safer pattern for “latest zero-day” awareness: fetch source-attributed
-security feeds, cache summaries locally, then let the model explain those
-entries against the current OS, package managers and findings. Do not let a
-model silently browse arbitrary pages and rewrite detections.
+`aegis checkup` pulls that vulnerability context from CISA KEV and NVD when
+online, and runs `--offline` when you'd rather skip the network call. Fetch
+from named, source-attributed feeds, cache the summaries locally, then let
+the model comment on what's there — that's the safer pattern for "latest
+zero-day" awareness. Never let a model browse arbitrary pages on its own and
+rewrite detections from what it finds.
 
 ### OSINT and external reputation
 
