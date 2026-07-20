@@ -6,6 +6,8 @@
 //	aegis scan PATH  headless scan (exit code 1 if threats found)
 //	aegis shield     ransomware sweep (canaries + notes + encrypted files)
 //	aegis audit      list autostart / persistence entries, flag suspicious ones
+//	aegis network    list live network connections and risky listeners
+//	aegis firewall   inspect or toggle the native firewall
 //	aegis analyze    disk exposure summary
 //	aegis clamav     optional local ClamAV daemon scan
 //	aegis ai         local/remote security analyst
@@ -26,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -85,6 +88,10 @@ func main() {
 			os.Exit(cliShield(os.Args[2:]))
 		case "audit":
 			os.Exit(cliAudit(os.Args[2:]))
+		case "network":
+			os.Exit(cliNetwork(os.Args[2:]))
+		case "firewall":
+			os.Exit(cliFirewall(os.Args[2:]))
 		case "analyze", "analyse":
 			os.Exit(cliAnalyze(os.Args[2:]))
 		case "clamav":
@@ -133,9 +140,9 @@ everyday:
 
 protection:
   shield                ransomware canaries + encrypted-file sweep
-  firewall              use the TUI Firewall tab for native firewall controls
+  network [--all]       live connections, risky listeners, safe next steps
+  firewall [status]     native firewall status; enable/disable explicitly
   audit                 persistence/autostart audit
-  network               use the TUI Network tab for live connections
 
 advanced:
   checkup               OS, dependency, and vulnerability feed checks
@@ -143,12 +150,15 @@ advanced:
   intel HASH            optional VirusTotal hash lookup
   clamav PATH           optional local ClamAV daemon scan
   analyze PATH          disk exposure summary
-  history               quarantine history
+  history               quarantine history and restore IDs
   restore ID            undo a quarantine (stored path or hash from history)
+  version               print the installed aegis version
 
 try:
   aegis app
   aegis scan ~/Downloads
+  aegis network
+  aegis checkup
   aegis help scan`)
 }
 
@@ -173,16 +183,34 @@ or remove canaries interactively.`)
 Lists autostart and persistence entries and flags suspicious commands, temp-dir
 payloads and encoded launchers. The TUI Audit tab shows exact disable commands.`)
 	case "firewall":
-		fmt.Println(`aegis firewall
+		fmt.Println(`aegis firewall [status|enable|disable|stealth-on|stealth-off] [--json]
 
-Firewall controls live in the TUI Firewall tab: press 5, then e enable,
-d disable, or t toggle stealth when supported. This keeps privileged actions
-visible and confirmable.`)
+Reads the native firewall:
+  - macOS Application Firewall + pf status where visible
+  - Linux ufw, nftables or iptables
+  - Windows Defender Firewall
+
+Without an action, prints status. Actions are explicit because they may need
+administrator/root privileges:
+  aegis firewall enable
+  aegis firewall disable
+  aegis firewall stealth-on     # macOS only
+  aegis firewall stealth-off    # macOS only`)
 	case "network":
-		fmt.Println(`aegis network
+		fmt.Println(`aegis network [--json] [--all]
 
-Network controls live in the TUI Network tab: press 4 to view connections,
-select a row, k to terminate a process, or b to show a firewall block command.`)
+Lists live connections and listeners with suspicious rows first.
+
+Default output is intentionally small: flagged entries only, or a short listener
+sample when nothing is flagged. Use --all for the full table.
+
+For each flagged row Aegis prints:
+  - why it was flagged
+  - read-only commands to investigate
+  - stop commands marked "at your own risk"
+
+Windows output includes Command Prompt alternatives when a PowerShell command may
+not be available.`)
 	case "status":
 		fmt.Println(`aegis status [--json]
 
@@ -215,17 +243,21 @@ provide; normal scans never call VirusTotal or upload files.`)
 Streams files to your own local clamd daemon with ClamAV INSTREAM. Install and
 start ClamAV yourself; Aegis does not bundle ClamAV or its databases.`)
 	case "gui":
-		fmt.Println(`aegis gui [--no-open] [--socket PATH]
+		fmt.Println(`aegis gui [--no-open] [--https] [--cert PATH --key PATH] [--socket PATH]
 
 Starts the local browser GUI on 127.0.0.1 only. Use aegis app for TUI + GUI sync.
+Plain http://127.0.0.1 is local-only and modern browsers treat localhost as a
+trusted context for most features. Use --https to serve a temporary self-signed
+localhost certificate, or pass --cert/--key from mkcert for a trusted lock icon.
 --socket also serves the API on a Unix domain socket at PATH, for a native app
 shell to talk to instead of opening a browser tab (macOS/Linux, and Windows
 10 1809+ / Server 2019+; older Windows falls back to TCP only).`)
 	case "app":
-		fmt.Println(`aegis app [--no-open] [--socket PATH]
+		fmt.Println(`aegis app [--no-open] [--https] [--cert PATH --key PATH] [--socket PATH]
 
 Starts the TUI and local browser GUI together so GUI actions appear in the TUI.
---socket also serves the API on a Unix domain socket at PATH; see aegis gui --help.`)
+--https, --cert, --key and --socket use the same local transport options as
+aegis gui; see aegis gui --help.`)
 	case "analyze", "analyse":
 		fmt.Println(`aegis analyze [PATH] [--json]
 
@@ -253,6 +285,12 @@ verifies it against the release's published SHA256SUMS, then atomically
 replaces the running binary on disk. Restart aegis afterward to use it. Same
 checks that run at TUI/GUI startup and on pressing u. If the binary's
 directory isn't writable, re-run as 'sudo aegis update'.`)
+	case "version":
+		fmt.Println(`aegis version
+aegis --version
+
+Prints the installed aegis version. Useful when comparing local binaries with
+GitHub release assets or debugging installer/update behavior.`)
 	default:
 		fmt.Fprintf(os.Stderr, "aegis: unknown help topic %q\n\n", topic)
 		usage()
@@ -382,6 +420,281 @@ func cliAudit(args []string) int {
 		fmt.Println("nothing suspicious ✓")
 	}
 	return 0
+}
+
+func cliNetwork(args []string) int {
+	args, jsonMode := splitJSON(args)
+	_, all := splitBoolFlag(args, "--all")
+	conns, err := netmon.List()
+	flagged := make([]netmon.Conn, 0)
+	listeners := make([]netmon.Conn, 0)
+	for _, c := range conns {
+		if c.Suspect != "" {
+			flagged = append(flagged, c)
+		}
+		if strings.Contains(strings.ToUpper(c.State), "LISTEN") {
+			listeners = append(listeners, c)
+		}
+	}
+	if jsonMode {
+		encodeJSON(map[string]any{
+			"os":           runtime.GOOS,
+			"connections":  conns,
+			"flagged":      len(flagged),
+			"flagged_rows": flagged,
+			"error":        errString(err),
+		})
+		if err != nil {
+			return 2
+		}
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "network:", err)
+		return 2
+	}
+	c := newCLIColors()
+	fmt.Printf("%s  %d connection(s), %d flagged\n", c.Bold("Network"), len(conns), len(flagged))
+	if len(flagged) == 0 {
+		fmt.Println(c.Green("No risky listeners or suspicious ports found."))
+		if !all {
+			printNetworkRows("Listener sample", listeners, 8, false)
+			fmt.Println(c.Muted("\nUse aegis network --all to print every row."))
+			return 0
+		}
+	}
+	if len(flagged) > 0 {
+		printNetworkRows("Flagged", flagged, len(flagged), true)
+	}
+	if all {
+		printNetworkRows("All connections", conns, len(conns), false)
+	}
+	return 0
+}
+
+func cliFirewall(args []string) int {
+	args, jsonMode := splitJSON(args)
+	action := "status"
+	if len(args) > 0 {
+		action = args[0]
+	}
+	var err error
+	switch action {
+	case "status", "":
+	case "enable", "on":
+		err = firewall.SetEnabled(true)
+	case "disable", "off":
+		err = firewall.SetEnabled(false)
+	case "stealth-on":
+		err = firewall.SetStealth(true)
+	case "stealth-off":
+		err = firewall.SetStealth(false)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: aegis firewall [status|enable|disable|stealth-on|stealth-off] [--json]")
+		return 2
+	}
+	status := firewall.Get()
+	if jsonMode {
+		encodeJSON(map[string]any{
+			"action": action,
+			"status": status,
+			"error":  errString(err),
+		})
+		if err != nil || status.Err != nil {
+			return 1
+		}
+		return 0
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "firewall action failed:", err)
+	}
+	printFirewallStatus(status)
+	if err != nil || status.Err != nil {
+		return 1
+	}
+	return 0
+}
+
+func printFirewallStatus(s firewall.Status) {
+	state := "disabled"
+	if s.Enabled {
+		state = "enabled"
+	}
+	fmt.Printf("Firewall  %s\n", state)
+	fmt.Println("backend:  " + s.Backend)
+	if s.StealthMode != "" {
+		fmt.Println("stealth:  " + s.StealthMode)
+	}
+	if s.RuleCount > 0 {
+		fmt.Printf("rules:    %d\n", s.RuleCount)
+	}
+	if s.Detail != "" {
+		fmt.Println("detail:   " + s.Detail)
+	}
+	if s.Err != nil {
+		fmt.Println("warning:  " + s.Err.Error())
+	}
+	switch runtime.GOOS {
+	case "windows":
+		fmt.Println("check:    netsh advfirewall show allprofiles state")
+		fmt.Println("enable:   netsh advfirewall set allprofiles state on")
+		fmt.Println("disable:  netsh advfirewall set allprofiles state off")
+	case "linux":
+		fmt.Println("check:    sudo ufw status OR sudo nft list ruleset OR sudo iptables -S")
+		fmt.Println("enable:   sudo ufw enable")
+		fmt.Println("disable:  sudo ufw disable")
+	case "darwin":
+		fmt.Println("check:    /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate")
+		fmt.Println("enable:   sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on")
+		fmt.Println("disable:  sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off")
+	}
+}
+
+func printNetworkRows(title string, conns []netmon.Conn, limit int, explain bool) {
+	if len(conns) == 0 {
+		return
+	}
+	if limit <= 0 || limit > len(conns) {
+		limit = len(conns)
+	}
+	fmt.Println("\n" + title + ":")
+	for i := 0; i < limit; i++ {
+		c := conns[i]
+		remote := c.Remote
+		if remote == "" {
+			remote = "listener"
+		}
+		state := c.State
+		if state == "" {
+			state = "-"
+		}
+		line := fmt.Sprintf("  %s pid %s  %s -> %s  [%s]", c.Proc, c.PID, c.Local, remote, state)
+		if c.Suspect != "" {
+			line += "  " + c.Suspect
+		}
+		fmt.Println(line)
+		if explain && c.Suspect != "" {
+			printNetworkAdvice(c)
+		}
+	}
+	if limit < len(conns) {
+		fmt.Printf("  ... %d more; use --all to print them\n", len(conns)-limit)
+	}
+}
+
+func printNetworkAdvice(c netmon.Conn) {
+	h := networkHints(c, runtime.GOOS)
+	fmt.Println("    why: " + h.Why)
+	if len(h.Explore) > 0 {
+		fmt.Println("    explore first:")
+		for _, cmd := range h.Explore {
+			fmt.Println("      " + cmd)
+		}
+	}
+	if len(h.Stop) > 0 {
+		fmt.Println("    at your own risk:")
+		for _, cmd := range h.Stop {
+			fmt.Println("      " + cmd)
+		}
+	}
+}
+
+type networkHint struct {
+	Why     string
+	Explore []string
+	Stop    []string
+}
+
+func networkHints(c netmon.Conn, goos string) networkHint {
+	port := networkLocalPort(c.Local)
+	pid := digitsOnly(c.PID)
+	h := networkHint{Why: networkWhy(c)}
+	switch goos {
+	case "windows":
+		if port != "" {
+			h.Explore = append(h.Explore,
+				"PowerShell: Get-NetTCPConnection -LocalPort "+port+" | Select-Object LocalAddress,LocalPort,State,OwningProcess",
+				"Command Prompt: netstat -ano | findstr :"+port,
+			)
+		}
+		if pid != "" {
+			h.Explore = append(h.Explore,
+				"PowerShell: Get-Process -Id "+pid,
+				`Command Prompt: tasklist /FI "PID eq `+pid+`"`,
+			)
+			h.Stop = append(h.Stop,
+				"PowerShell: Stop-Process -Id "+pid+" -Force",
+				"Command Prompt: taskkill /PID "+pid+" /F",
+			)
+		}
+	case "linux":
+		if port != "" {
+			h.Explore = append(h.Explore,
+				"ss -ltnp 'sport = :"+port+"'",
+				"lsof -nP -iTCP:"+port+" -sTCP:LISTEN",
+			)
+		}
+		if pid != "" {
+			h.Explore = append(h.Explore,
+				"ps -p "+pid+" -o pid,ppid,user,comm,args",
+				"lsof -nP -p "+pid+" -iTCP",
+			)
+			h.Stop = append(h.Stop, "kill "+pid, "sudo kill -9 "+pid)
+		}
+	default:
+		if port != "" {
+			h.Explore = append(h.Explore, "lsof -nP -iTCP:"+port+" -sTCP:LISTEN")
+		}
+		if pid != "" {
+			h.Explore = append(h.Explore,
+				"ps -p "+pid+" -o pid,ppid,user,comm,args",
+				"lsof -nP -p "+pid+" -iTCP",
+			)
+			h.Stop = append(h.Stop, "kill "+pid, "sudo kill -9 "+pid)
+		}
+	}
+	return h
+}
+
+func networkWhy(c netmon.Conn) string {
+	if strings.Contains(c.Suspect, "all interfaces") {
+		return "the process accepts connections beyond localhost; this may be a normal service or dev server, but it deserves confirmation"
+	}
+	if strings.Contains(c.Suspect, "remote") {
+		return "the remote port is associated with remote shells, admin tools or old botnet control channels; confirm the destination before trusting it"
+	}
+	return "a network heuristic matched; treat it as a lead, not proof of malware"
+}
+
+func networkLocalPort(addr string) string {
+	i := strings.LastIndex(addr, ":")
+	if i < 0 || i == len(addr)-1 {
+		return ""
+	}
+	p := addr[i+1:]
+	for _, r := range p {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return p
+}
+
+func digitsOnly(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func cliAnalyze(args []string) int {
@@ -638,25 +951,49 @@ func cliIntel(args []string) int {
 // parseGUIFlags reads the flags shared by `aegis gui` and `aegis app`:
 // --no-open (skip launching a browser tab) and --socket <path> (also serve
 // the API on a Unix domain socket, for a future native app shell).
-func parseGUIFlags(args []string) (open bool, socket string) {
-	open = true
+type guiFlags struct {
+	open   bool
+	socket string
+	https  bool
+	cert   string
+	key    string
+}
+
+func parseGUIFlags(args []string) guiFlags {
+	flags := guiFlags{open: true}
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--no-open":
-			open = false
+			flags.open = false
+		case args[i] == "--https" || args[i] == "--tls":
+			flags.https = true
 		case args[i] == "--socket" && i+1 < len(args):
 			i++
-			socket = args[i]
+			flags.socket = args[i]
 		case strings.HasPrefix(args[i], "--socket="):
-			socket = strings.TrimPrefix(args[i], "--socket=")
+			flags.socket = strings.TrimPrefix(args[i], "--socket=")
+		case args[i] == "--cert" && i+1 < len(args):
+			i++
+			flags.cert = args[i]
+			flags.https = true
+		case strings.HasPrefix(args[i], "--cert="):
+			flags.cert = strings.TrimPrefix(args[i], "--cert=")
+			flags.https = true
+		case args[i] == "--key" && i+1 < len(args):
+			i++
+			flags.key = args[i]
+			flags.https = true
+		case strings.HasPrefix(args[i], "--key="):
+			flags.key = strings.TrimPrefix(args[i], "--key=")
+			flags.https = true
 		}
 	}
-	return open, socket
+	return flags
 }
 
 func cliGUI(db *signatures.DB, eng *rules.Engine, args []string) int {
-	open, socket := parseGUIFlags(args)
-	if err := gui.Run(context.Background(), db, eng, gui.Options{OpenBrowser: open, Version: ui.Version, Socket: socket}); err != nil && err != context.Canceled {
+	flags := parseGUIFlags(args)
+	if err := gui.Run(context.Background(), db, eng, gui.Options{OpenBrowser: flags.open, Version: ui.Version, Socket: flags.socket, HTTPS: flags.https, CertFile: flags.cert, KeyFile: flags.key}); err != nil && err != context.Canceled {
 		fmt.Fprintln(os.Stderr, "gui:", err)
 		return 1
 	}
@@ -664,7 +1001,7 @@ func cliGUI(db *signatures.DB, eng *rules.Engine, args []string) int {
 }
 
 func cliApp(db *signatures.DB, eng *rules.Engine, args []string) int {
-	open, socket := parseGUIFlags(args)
+	flags := parseGUIFlags(args)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -672,9 +1009,12 @@ func cliApp(db *signatures.DB, eng *rules.Engine, args []string) int {
 	p := tea.NewProgram(ui.NewWithOptions(db, eng, ui.Options{StartupMaintenance: false}), tea.WithAltScreen())
 	go func() {
 		errCh <- gui.Run(ctx, db, eng, gui.Options{
-			OpenBrowser: open,
+			OpenBrowser: flags.open,
 			Version:     ui.Version,
-			Socket:      socket,
+			Socket:      flags.socket,
+			HTTPS:       flags.https,
+			CertFile:    flags.cert,
+			KeyFile:     flags.key,
 			OnEvent: func(e appsync.Event) {
 				p.Send(e)
 			},
@@ -1209,6 +1549,14 @@ func printChecks(title string, checks []checkup.Check) {
 		fmt.Printf("  [%s] %s — %s\n", c.Status, c.Name, c.Summary)
 		for _, item := range c.Items {
 			fmt.Println("    " + item)
+		}
+		if c.Command != "" {
+			fmt.Println("    check: " + c.Command)
+		}
+		if c.Status != "ok" {
+			for _, fix := range c.Remediation {
+				fmt.Println("    fix:   " + fix)
+			}
 		}
 		if c.Error != "" {
 			fmt.Println("    error: " + c.Error)

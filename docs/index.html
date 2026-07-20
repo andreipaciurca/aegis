@@ -7,8 +7,8 @@
 <meta name="robots" content="index,follow">
 <meta name="description" content="aegis — malware & ransomware detection, firewall control, network monitoring and a persistence audit in one terminal binary.">
 <link rel="canonical" href="https://andreipaciurca.github.io/aegis/">
-<link rel="icon" href="./favicon.svg" type="image/svg+xml">
-<title>aegis — internet security, in your terminal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2311111b'/%3E%3Cpath fill='%23cba6f7' d='M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z'/%3E%3C/svg%3E" type="image/svg+xml">
+<title>aegis</title>
 <script>
   // Apply the saved/system theme before first paint to avoid a flash.
   (function () {
@@ -811,10 +811,27 @@ aegis ai chat</code>
     });
     userInstall.addEventListener("change", syncCommand);
     syncCommand();
+    function copyText(text, done) {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done).catch(function () { fallbackCopy(text, done); });
+        return;
+      }
+      fallbackCopy(text, done);
+    }
+    function fallbackCopy(text, done) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); done(); } catch (e) {}
+      ta.remove();
+    }
+    window.aegisCopyText = copyText;
     copy.addEventListener("click", function () {
-      var text = out.textContent;
-      if (!navigator.clipboard) { return; }
-      navigator.clipboard.writeText(text).then(function () {
+      copyText(out.textContent, function () {
         copy.textContent = "copied";
         setTimeout(function () { copy.textContent = "copy"; }, 1200);
       });
@@ -823,7 +840,6 @@ aegis ai chat</code>
 
   // Quickstart step copy buttons.
   (function () {
-    if (!navigator.clipboard) { return; }
     document.querySelectorAll(".stepline").forEach(function (line) {
       var code = line.querySelector("code");
       if (!code) { return; }
@@ -834,7 +850,7 @@ aegis ai chat</code>
       btn.setAttribute("aria-label", "Copy command");
       line.appendChild(btn);
       btn.addEventListener("click", function () {
-        navigator.clipboard.writeText(code.textContent).then(function () {
+        window.aegisCopyText(code.textContent, function () {
           btn.textContent = "copied";
           setTimeout(function () { btn.textContent = "copy"; }, 1200);
         });

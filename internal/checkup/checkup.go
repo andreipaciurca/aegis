@@ -49,13 +49,14 @@ type OSReport struct {
 }
 
 type Check struct {
-	Name     string   `json:"name"`
-	Status   string   `json:"status"` // ok | warn | error | unknown
-	Summary  string   `json:"summary"`
-	Items    []string `json:"items,omitempty"`
-	Command  string   `json:"command,omitempty"`
-	Error    string   `json:"error,omitempty"`
-	Duration string   `json:"duration,omitempty"`
+	Name        string   `json:"name"`
+	Status      string   `json:"status"` // ok | warn | error | unknown
+	Summary     string   `json:"summary"`
+	Items       []string `json:"items,omitempty"`
+	Command     string   `json:"command,omitempty"`
+	Remediation []string `json:"remediation,omitempty"`
+	Error       string   `json:"error,omitempty"`
+	Duration    string   `json:"duration,omitempty"`
 }
 
 type VulnerabilityReport struct {
@@ -232,7 +233,13 @@ func commandCheck(name, command string, timeout time.Duration, bin string, args 
 	if name == "Go module updates" {
 		items = filterGoUpdates(items)
 	}
-	c := Check{Name: name, Command: command, Items: items, Duration: time.Since(start).Round(time.Millisecond).String()}
+	c := Check{
+		Name:        name,
+		Command:     command,
+		Remediation: remediationFor(command),
+		Items:       items,
+		Duration:    time.Since(start).Round(time.Millisecond).String(),
+	}
 	if err != nil {
 		if strings.TrimSpace(out) != "" {
 			c.Status = "warn"
@@ -371,7 +378,13 @@ func recommendations(r Report) ([]string, []string) {
 	for _, c := range append(r.Updates, r.Dependencies...) {
 		switch c.Status {
 		case "warn":
-			recs = append(recs, "Review "+c.Name+": "+c.Command)
+			if len(c.Remediation) > 0 {
+				recs = append(recs, "Fix "+c.Name+": "+strings.Join(c.Remediation, " && "))
+			} else if c.Command != "" {
+				recs = append(recs, "Review "+c.Name+": "+c.Command)
+			} else {
+				recs = append(recs, "Review "+c.Name)
+			}
 		case "error", "unknown":
 			unsupported = append(unsupported, c.Name+": "+c.Summary)
 		}
@@ -383,6 +396,41 @@ func recommendations(r Report) ([]string, []string) {
 		recs = append(recs, "Review recent critical NVD CVEs and match them to installed software")
 	}
 	return recs, unsupported
+}
+
+func remediationFor(command string) []string {
+	switch {
+	case strings.HasPrefix(command, "softwareupdate -l"):
+		return []string{"sudo softwareupdate -ia --restart"}
+	case strings.HasPrefix(command, "apt "):
+		return []string{"sudo apt update", "sudo apt upgrade"}
+	case strings.HasPrefix(command, "dnf "):
+		return []string{"sudo dnf upgrade"}
+	case strings.HasPrefix(command, "zypper "):
+		return []string{"sudo zypper refresh", "sudo zypper update"}
+	case strings.HasPrefix(command, "pacman "):
+		return []string{"sudo pacman -Syu"}
+	case strings.HasPrefix(command, "apk "):
+		return []string{"sudo apk update", "sudo apk upgrade"}
+	case strings.HasPrefix(command, "brew outdated"):
+		return []string{"brew upgrade"}
+	case strings.HasPrefix(command, "npm outdated"):
+		return []string{"npm update -g"}
+	case strings.HasPrefix(command, "python -m pip list --outdated"):
+		return []string{"python -m pip install --upgrade <package>"}
+	case strings.HasPrefix(command, "python3 -m pip list --outdated"):
+		return []string{"python3 -m pip install --upgrade <package>"}
+	case strings.HasPrefix(command, "winget upgrade"):
+		return []string{"winget upgrade --all"}
+	case strings.HasPrefix(command, "Get-HotFix"):
+		return []string{
+			"PowerShell: Start-Process ms-settings:windowsupdate",
+			"Command Prompt: start ms-settings:windowsupdate",
+		}
+	case strings.HasPrefix(command, "go list -m -u"):
+		return []string{"go get -u ./...", "go mod tidy"}
+	}
+	return nil
 }
 
 func run(timeout time.Duration, bin string, args ...string) (string, error) {

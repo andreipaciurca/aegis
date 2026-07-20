@@ -40,6 +40,26 @@ func TestFilterGoUpdates(t *testing.T) {
 	}
 }
 
+func TestRemediationForKnownTools(t *testing.T) {
+	cases := map[string]string{
+		"softwareupdate -l":                            "sudo softwareupdate -ia --restart",
+		"apt list --upgradable":                        "sudo apt update",
+		"brew outdated --quiet":                        "brew upgrade",
+		"npm outdated -g --depth=0":                    "npm update -g",
+		"python -m pip list --outdated --format=json":  "python -m pip install --upgrade <package>",
+		"python3 -m pip list --outdated --format=json": "python3 -m pip install --upgrade <package>",
+		"winget upgrade":                               "winget upgrade --all",
+		"Get-HotFix":                                   "PowerShell: Start-Process ms-settings:windowsupdate",
+		"go list -m -u all":                            "go get -u ./...",
+	}
+	for command, want := range cases {
+		got := remediationFor(command)
+		if len(got) == 0 || got[0] != want {
+			t.Errorf("remediationFor(%q) = %v, want first command %q", command, got, want)
+		}
+	}
+}
+
 func TestTrimCollapsesWhitespaceAndTruncates(t *testing.T) {
 	got := trim("  a   critical   vulnerability   description  ", 15)
 	if len([]rune(got)) > 15 {
