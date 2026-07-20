@@ -225,6 +225,9 @@ func resolveScanRoot(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !safeFilesystemPathPattern.MatchString(root) {
+		return "", errors.New("unsafe scan root path")
+	}
 	// codeql[go/path-injection]
 	// A scanner must inspect the user-selected local
 	// root. cleanUserPath rejects NUL bytes and normalizes it to an absolute
