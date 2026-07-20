@@ -727,11 +727,11 @@ func (m Model) viewAI() string {
 		b.WriteString("  " + cardTitleStyle.Render("SETUP") + "\n")
 		b.WriteString("  " + warnStyle.Render("Ask/test/explain are disabled until a local llama.cpp backend is ready.") + "\n")
 		setup := []string{
-			"1. Install llama.cpp, then put a GGUF model at ~/.config/aegis/models/model.gguf",
-			"2. Server mode: llama-server -m ~/.config/aegis/models/model.gguf --host 127.0.0.1 --port 8080",
-			"3. Configure: aegis ai config --backend llamacpp-server --endpoint http://127.0.0.1:8080/v1/chat/completions",
-			"4. Or CLI mode: aegis ai config --backend llamacpp-cli --model ~/.config/aegis/models/model.gguf --command llama-cli",
-			"5. Remote opt-in: aegis ai config --backend openai-compatible --endpoint https://api.openai.com/v1/chat/completions --remote-model gpt-5-mini --api-key-env OPENAI_API_KEY",
+			"1. Run: aegis ai setup",
+			"2. Optional managed llama.cpp install/update: aegis ai setup --download-llama",
+			"3. Recommended model: Gemma 4 E4B or Gemma 3 4B instruct GGUF, Q4_K_M",
+			"4. Fast model path: llama-server -hf lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M --host 127.0.0.1 --port 8080",
+			"5. Configure: aegis ai config --backend llamacpp-server --endpoint http://127.0.0.1:8080/v1/chat/completions",
 			"6. Press r here after starting/configuring it.",
 		}
 		for _, line := range setup {

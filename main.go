@@ -223,7 +223,7 @@ Checks OS/dependency update signals and recent CISA KEV/NVD vulnerability feeds.
 Use --offline to skip online vulnerability feeds.`)
 	case "ai":
 		fmt.Println(`aegis ai status
-aegis ai setup [--download-llama]
+aegis ai setup [--download-llama] [--json]
 aegis ai config --backend llamacpp-server --endpoint URL
 aegis ai test [prompt]
 aegis ai chat
@@ -851,19 +851,79 @@ func cliAI(args []string) int {
 }
 
 func cliAISetup(args ...string) int {
+	args, jsonMode := splitJSON(args)
 	opts := ai.SetupOptions{}
 	for _, a := range args {
 		if a == "--download-llama" {
 			opts.DownloadLlama = true
+			continue
 		}
+		fmt.Fprintln(os.Stderr, "usage: aegis ai setup [--download-llama] [--json]")
+		return 2
 	}
 	plan, err := ai.RunSetup(opts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ai setup:", err)
 		return 1
 	}
-	encodeJSON(plan)
+	if jsonMode {
+		encodeJSON(plan)
+		return 0
+	}
+	printAISetupPlan(plan)
 	return 0
+}
+
+func printAISetupPlan(plan ai.SetupPlan) {
+	colors := newCLIColors()
+	fmt.Println(colors.Blue("Aegis local AI setup"))
+	fmt.Println()
+	fmt.Printf("Install dir: %s\n", plan.InstallDir)
+	fmt.Printf("Model dir:   %s\n", plan.ModelDir)
+	fmt.Printf("Recommended: %s\n", plan.Recommended)
+	fmt.Printf("llama.cpp:   %s\n", plan.LlamaReleaseURL)
+	fmt.Println()
+	if len(plan.ModelSources) > 0 {
+		fmt.Println(colors.Bold("Model downloads"))
+		for _, src := range plan.ModelSources {
+			fmt.Printf("- %s\n  %s\n  ref: %s\n  note: %s\n", src.Name, src.URL, src.Ref, src.Note)
+		}
+		fmt.Println()
+	}
+	for _, section := range plan.Sections {
+		fmt.Println(colors.Bold(section.Title))
+		if section.Why != "" {
+			fmt.Println(section.Why)
+		}
+		for _, cmd := range section.Commands {
+			fmt.Printf("\n%s\n", colors.Blue(cmd.Label))
+			if cmd.Unix != "" {
+				fmt.Println("macOS/Linux/Unix:")
+				printCommandBlock(cmd.Unix)
+			}
+			if cmd.PowerShell != "" {
+				fmt.Println("Windows PowerShell:")
+				printCommandBlock(cmd.PowerShell)
+			}
+			if cmd.Cmd != "" {
+				fmt.Println("Windows cmd.exe fallback:")
+				printCommandBlock(cmd.Cmd)
+			}
+		}
+		fmt.Println()
+	}
+	if len(plan.Notes) > 0 {
+		fmt.Println(colors.Bold("Notes"))
+		for _, note := range plan.Notes {
+			fmt.Println("- " + note)
+		}
+	}
+}
+
+func printCommandBlock(cmd string) {
+	for _, line := range strings.Split(cmd, "\n") {
+		fmt.Println("  " + line)
+	}
 }
 
 func cliCheckup(args []string) int {
