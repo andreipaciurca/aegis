@@ -351,12 +351,18 @@ aegis clamav ~/Downloads --addr tcp://127.0.0.1:3310 --json
 - **Startup:** `aegis`, `aegis gui` and `aegis app` automatically refresh the
   malware signature DB and check for newer aegis/llama.cpp releases in the
   background. The app opens immediately and reports the result in the status
-  area.
+  area. These automatic checks are throttled to once every 30 minutes
+  (`AEGIS_STARTUP_CHECK_INTERVAL`, a Go duration like `10m` or `1h`; `0`
+  disables throttling) so relaunching aegis repeatedly — a dev loop, a busy
+  shell — doesn't refetch signatures and poll two GitHub endpoints on every
+  single launch. The signature *count* shown is always read live even when
+  the network checks are skipped, so it's never stale-looking.
 - **Manual update:** press `u` in the TUI/paired app, use the GUI
   **Update & Check Versions** button, or run `aegis update` (add `--json` for
   scripts) — all three do the same thing: refresh signatures and check
-  whether a newer aegis or llama.cpp release is available. For automation:
-  `crontab -e` → `0 9 * * * /usr/local/bin/aegis update`.
+  whether a newer aegis or llama.cpp release is available, and unlike the
+  automatic startup check, these are never throttled — they're always live.
+  For automation: `crontab -e` → `0 9 * * * /usr/local/bin/aegis update`.
 - **The app:** it is one static binary, and aegis never silently replaces it.
   `aegis update` (or the checks above) will tell you a newer release exists
   and print its URL — then `git pull && make install`, re-run the
@@ -446,7 +452,9 @@ tools look much more suspicious to heuristic scanners.
   (caches, `node_modules`, `.git`). Ransomware canaries are polled, not
   watched with a kernel inotify tree, so protection stays nearly free.
   On low-power systems, set `AEGIS_SCAN_WORKERS=1` (or another value up to 8)
-  to trade scan speed for lower CPU, memory and I/O pressure.
+  to trade scan speed for lower CPU, memory and I/O pressure. Automatic
+  startup checks are cached for 30 minutes by default
+  (`AEGIS_STARTUP_CHECK_INTERVAL`) so they cost nothing on repeat launches.
 - **Reliability:** the scanner treats unreadable files as skips, never fatal;
   firewall, network and audit views degrade gracefully without root. Killing a
   process asks for confirmation first, because it can't be undone, and refuses
