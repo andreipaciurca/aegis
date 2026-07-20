@@ -30,6 +30,15 @@ type Options struct {
 	OpenBrowser bool
 	Version     string
 	OnEvent     func(appsync.Event)
+	// Socket, when set, additionally serves the API (not the HTML page) on a
+	// Unix domain socket at this path — for a native app shell (SwiftUI,
+	// GTK, …) that wants the local API without opening a browser tab or
+	// leaving a TCP port listening. The TCP listener always still starts
+	// too, so aegis gui/app keep working exactly as before. Supported on
+	// macOS and Linux, and on Windows 10 1809+ / Server 2019+ (Go's "unix"
+	// network works there via AF_UNIX); on older Windows the socket is
+	// skipped with a warning rather than failing the whole server.
+	Socket string
 }
 
 type Server struct {
@@ -81,18 +90,58 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 	httpSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.Serve(ln) }()
+
+	var sockLn net.Listener
+	if opts.Socket != "" {
+		sockLn, err = listenUnixSocket(opts.Socket)
+		if err != nil {
+			fmt.Println("Aegis GUI: unix socket unavailable, continuing with TCP only:", err)
+		} else {
+			fmt.Println("Aegis GUI socket:", opts.Socket)
+			go func() { errCh <- httpSrv.Serve(sockLn) }()
+		}
+	}
+
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)
+		if sockLn != nil {
+			_ = os.Remove(opts.Socket)
+		}
 		return ctx.Err()
 	case err := <-errCh:
+		if sockLn != nil {
+			_ = os.Remove(opts.Socket)
+		}
 		if err == http.ErrServerClosed {
 			return nil
 		}
 		return err
 	}
+}
+
+// listenUnixSocket binds a Unix domain socket at path for the local API.
+// It removes a stale socket file left behind by an unclean previous exit
+// (only when the path really is a socket, never a regular file) and
+// tightens permissions to owner-only, since this API can quarantine files,
+// scan the filesystem, and toggle the firewall.
+//
+// Works on macOS and Linux, and on Windows 10 1809+ / Server 2019+, where
+// Go's "unix" network is backed by native AF_UNIX support. On older Windows
+// (or any other platform without AF_UNIX), net.Listen returns an error here
+// and the caller falls back to TCP-only rather than failing the whole server.
+func listenUnixSocket(path string) (net.Listener, error) {
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(path)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(path, 0o600)
+	return ln, nil
 }
 
 // requireSameOrigin blocks the well-known "a webpage open in another tab
