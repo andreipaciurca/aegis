@@ -39,13 +39,18 @@ func TestMarkdownDocsAvoidStaleReleaseAndUIDetails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read README.md: %v", err)
 	}
+	guide, err := os.ReadFile(filepath.Join("docs", "USER_GUIDE.md"))
+	if err != nil {
+		t.Fatalf("read USER_GUIDE.md: %v", err)
+	}
 	readmeText := string(readme)
 	if strings.Contains(readmeText, "7 tabs") {
 		t.Fatal("README architecture should not hard-code the old TUI tab count")
 	}
-	for _, want := range []string{"responsive tabs", "Local browser GUI", "Release flow"} {
-		if !strings.Contains(readmeText, want) {
-			t.Fatalf("README missing expected current documentation marker %q", want)
+	guideText := string(guide)
+	for _, want := range []string{"local browser GUI", "Release Publishing", "responsive"} {
+		if !strings.Contains(readmeText+"\n"+guideText, want) {
+			t.Fatalf("docs missing expected current documentation marker %q", want)
 		}
 	}
 

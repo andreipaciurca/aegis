@@ -16,7 +16,7 @@ welcome. This doc covers dev setup, testing, and the shape of a good PR.
 
 ## Dev setup
 
-Requires Go 1.21+ (the toolchain auto-fetches the exact version pinned in
+Requires Go 1.25.12+ (the toolchain auto-fetches the exact version pinned in
 `go.mod` if needed).
 
 ```sh
@@ -106,8 +106,8 @@ firewall changes:
   backends, VirusTotal, and ClamAV are all explicit and user-triggered.
   Normal scans never call out to the network except to fetch signatures.
 - **Prefer free, self-hostable, or public intelligence sources** over paid or
-  closed ones — see the "Free and free-to-use detection sources" table in the
-  [README](README.md#free-and-free-to-use-detection-sources).
+  closed ones — see the "Detection Sources" table in the
+  [user guide](docs/USER_GUIDE.md#detection-sources).
 - **Don't overclaim.** aegis is honest about not being a Bitdefender/
   Kaspersky replacement. Feature descriptions and marketing copy should stay
   in that register.
