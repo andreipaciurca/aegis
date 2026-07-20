@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a new capability or improvement for aegis
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: What are you trying to do that aegis doesn't support today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Roughly how you imagine this working — a new flag, a TUI/GUI panel, a rule type, etc.
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        Worth a skim before submitting: aegis has some deliberate constraints —
+        no daemons or background services, privacy-first (nothing calls out to
+        the network unless you explicitly ask it to), and it's honest about not
+        being a Bitdefender/Kaspersky replacement. See
+        [CONTRIBUTING.md](https://github.com/andreipaciurca/aegis/blob/main/CONTRIBUTING.md#design-constraints-that-prs-should-respect)
+        for the full list. A request that cuts against one of these isn't
+        automatically a no — just flag the tradeoff so it can be discussed.

@@ -1,0 +1,21 @@
+GNU GENERAL PUBLIC LICENSE
+Version 3, 29 June 2007
+
+Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
+Everyone is permitted to copy and distribute verbatim copies
+of this license document, but changing it is not allowed.
+
+This project, aegis, is licensed under the GNU General Public License
+version 3 or, at your option, any later version.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+In plain English: you may use, copy, study, modify, share, and publish aegis,
+including for commercial purposes, as long as redistributed copies and modified
+versions remain open source under the same license terms and keep the copyright
+and attribution notices. This summary is not a substitute for the license text.
+
+The full GPL-3.0-or-later terms apply. If your copy of this repository does not
+include the complete license text, read it at:
+
+https://www.gnu.org/licenses/gpl-3.0.html

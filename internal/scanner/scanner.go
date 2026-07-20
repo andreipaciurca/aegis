@@ -1,0 +1,1174 @@
+// Package scanner walks the filesystem, hashes files and reports threats
+// found via signature matches or heuristics.
+package scanner
+
+import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/andreipaciurca/aegis/internal/entropy"
+	"github.com/andreipaciurca/aegis/internal/ransom"
+	"github.com/andreipaciurca/aegis/internal/rules"
+	"github.com/andreipaciurca/aegis/internal/signatures"
+)
+
+// MaxFileSize caps how large a file we will hash (skip huge media/VM images).
+const MaxFileSize = 200 << 20 // 200 MiB
+
+// headSize is how much of each file we read for rule and entropy analysis.
+const headSize = 64 << 10 // 64 KiB
+
+// EICAR is the standard, harmless antivirus test string.
+var eicarMarker = []byte(`EICAR-STANDARD-ANTIVIRUS-TEST-FILE`)
+
+var safeFilesystemPathPattern = regexp.MustCompile(`^[^\x00]+$`)
+
+// Severity of a finding.
+type Severity int
+
+const (
+	SevInfo Severity = iota
+	SevWarning
+	SevCritical
+)
+
+func (s Severity) String() string {
+	switch s {
+	case SevCritical:
+		return "CRITICAL"
+	case SevWarning:
+		return "WARNING"
+	default:
+		return "INFO"
+	}
+}
+
+// Threat is a single finding.
+type Threat struct {
+	Path     string   `json:"path"`
+	SHA256   string   `json:"sha256"`
+	Reason   string   `json:"reason"`
+	Severity Severity `json:"severity"`
+	Size     int64    `json:"size"`
+}
+
+// Progress is a snapshot of a running scan.
+type Progress struct {
+	Phase   string // "counting" | "scanning" | "done" | "cancelled" | "error"
+	Total   int64
+	Scanned int64
+	Skipped int64
+	Current string
+	Threats []Threat
+	Err     error
+	Started time.Time
+	Ended   time.Time
+}
+
+var errScanCancelled = errors.New("scan cancelled")
+
+// Scan walks root and streams Progress snapshots on the returned channel.
+// The final message has Phase "done" (or "error") and the full threat list.
+func Scan(root string, db *signatures.DB, eng *rules.Engine, cancel <-chan struct{}) <-chan Progress {
+	out := make(chan Progress, 64)
+	go func() {
+		defer close(out)
+		start := time.Now()
+		if resolved, err := resolveScanRoot(root); err == nil {
+			root = resolved
+		}
+		var total, scanned, skipped int64
+		var cancelled atomic.Bool
+
+		jobs := make(chan string, 256)
+		var wg sync.WaitGroup
+		workers := workerCount()
+		var mu sync.Mutex
+		var threats []Threat
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for path := range jobs {
+					t, ok, skip := scanFile(path, db, eng)
+					if skip {
+						atomic.AddInt64(&skipped, 1)
+					}
+					if ok {
+						mu.Lock()
+						threats = append(threats, t)
+						mu.Unlock()
+					}
+					atomic.AddInt64(&scanned, 1)
+				}
+			}()
+		}
+
+		ticker := time.NewTicker(200 * time.Millisecond)
+		tickDone := make(chan struct{})
+		tickStopped := make(chan struct{})
+		go func() {
+			defer close(tickStopped)
+			for {
+				select {
+				case <-tickDone:
+					return
+				case <-ticker.C:
+					mu.Lock()
+					snap := make([]Threat, len(threats))
+					copy(snap, threats)
+					mu.Unlock()
+					select {
+					case out <- Progress{
+						Phase: "scanning", Total: atomic.LoadInt64(&total),
+						Scanned: atomic.LoadInt64(&scanned),
+						Skipped: atomic.LoadInt64(&skipped),
+						Threats: snap, Started: start,
+					}:
+					default: // never block the ticker on a slow consumer
+					}
+				}
+			}
+		}()
+
+		out <- Progress{Phase: "counting", Started: start}
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			select {
+			case <-cancel:
+				cancelled.Store(true)
+				return errScanCancelled
+			default:
+			}
+			if err != nil {
+				return nil // unreadable: skip, keep walking
+			}
+			if d.IsDir() {
+				if skipDir(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			n := atomic.AddInt64(&total, 1)
+			if n%2048 == 0 {
+				out <- Progress{Phase: "counting", Total: n, Scanned: atomic.LoadInt64(&scanned), Started: start}
+			}
+			select {
+			case <-cancel:
+				cancelled.Store(true)
+				return errScanCancelled
+			case jobs <- path:
+			}
+			return nil
+		})
+		close(jobs)
+		if errors.Is(err, errScanCancelled) || cancelled.Load() {
+			wg.Wait()
+			close(tickDone)
+			ticker.Stop()
+			<-tickStopped
+			sortThreats(threats)
+			out <- Progress{
+				Phase: "cancelled", Total: atomic.LoadInt64(&total),
+				Scanned: atomic.LoadInt64(&scanned), Skipped: atomic.LoadInt64(&skipped),
+				Threats: threats, Started: start, Ended: time.Now(),
+			}
+			return
+		}
+		if err != nil {
+			wg.Wait()
+			close(tickDone)
+			ticker.Stop()
+			<-tickStopped
+			out <- Progress{Phase: "error", Err: err, Started: start, Ended: time.Now()}
+			return
+		}
+		wg.Wait()
+		close(tickDone)
+		ticker.Stop()
+		<-tickStopped
+		scannedFinal := atomic.LoadInt64(&scanned)
+		sortThreats(threats)
+		phase := "done"
+		if cancelled.Load() {
+			phase = "cancelled"
+		}
+		out <- Progress{
+			Phase: phase, Total: atomic.LoadInt64(&total), Scanned: scannedFinal,
+			Skipped: atomic.LoadInt64(&skipped), Threats: threats,
+			Started: start, Ended: time.Now(),
+		}
+	}()
+	return out
+}
+
+func resolveScanRoot(root string) (string, error) {
+	root, err := cleanUserPath(root)
+	if err != nil {
+		return "", err
+	}
+	if !safeFilesystemPathPattern.MatchString(root) {
+		return "", errors.New("unsafe scan root path")
+	}
+	// codeql[go/path-injection]
+	// A scanner must inspect the user-selected local
+	// root. cleanUserPath rejects NUL bytes and normalizes it to an absolute
+	// clean path before this filesystem operation.
+	info, err := os.Lstat(root)
+	if err != nil {
+		return root, err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return root, nil
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return root, err
+	}
+	return resolved, nil
+}
+
+// scanFile returns (threat, found, skipped). Detection layers, cheapest first:
+// filename heuristics → signature hash → EICAR → YARA-lite rules + entropy.
+func scanFile(path string, db *signatures.DB, eng *rules.Engine) (Threat, bool, bool) {
+	path, err := cleanUserPath(path)
+	if err != nil {
+		return Threat{}, false, true
+	}
+	// codeql[go/path-injection]
+	// A scanner must inspect user-selected local
+	// files. cleanUserPath rejects NUL bytes and normalizes the path first.
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return Threat{}, false, true
+	}
+	if info.Size() > MaxFileSize {
+		return Threat{}, false, true
+	}
+
+	if reason, sev, hit := heuristics(path, info); hit {
+		return Threat{Path: path, Reason: reason, Severity: sev, Size: info.Size()}, true, false
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return Threat{}, false, true
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	head := make([]byte, headSize)
+	n, _ := io.ReadFull(f, head)
+	head = head[:n]
+	h.Write(head)
+	if _, err := io.Copy(h, f); err != nil {
+		return Threat{}, false, true
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+
+	if bytes.Contains(head, eicarMarker) {
+		return Threat{Path: path, SHA256: sum, Reason: "EICAR antivirus test file", Severity: SevCritical, Size: info.Size()}, true, false
+	}
+	if sig, ok := db.Lookup(sum); ok {
+		reason, sev := signatureReason(sig)
+		return Threat{Path: path, SHA256: sum, Reason: reason, Severity: sev, Size: info.Size()}, true, false
+	}
+
+	ent := entropy.Shannon(head)
+
+	// Magic-byte mismatch: a file whose extension promises a known format but
+	// whose header doesn't match, with a high-entropy body, is very likely
+	// encrypted — a hallmark of ransomware silently rewriting documents.
+	if magicMismatch(path, head) && ent > 7.4 {
+		return Threat{Path: path, SHA256: sum,
+			Reason:   "Content doesn't match extension + high entropy (likely encrypted)",
+			Severity: SevCritical, Size: info.Size()}, true, false
+	}
+
+	// Rule engine + entropy on the head sample. Critical hits win; otherwise
+	// the highest-severity hit is reported.
+	if eng != nil {
+		if hits := eng.Match(path, head, ent); len(hits) > 0 {
+			best := hits[0]
+			for _, hh := range hits {
+				if sevRank(hh.Severity) > sevRank(best.Severity) {
+					best = hh
+				}
+			}
+			return Threat{Path: path, SHA256: sum,
+				Reason:   "Rule: " + best.Rule + " — " + best.Desc,
+				Severity: sevFromString(best.Severity), Size: info.Size()}, true, false
+		}
+	}
+	return Threat{}, false, false
+}
+
+func sevRank(s string) int {
+	switch strings.ToLower(s) {
+	case "critical":
+		return 2
+	case "warning":
+		return 1
+	}
+	return 0
+}
+
+func sevFromString(s string) Severity {
+	switch strings.ToLower(s) {
+	case "critical":
+		return SevCritical
+	case "warning":
+		return SevWarning
+	}
+	return SevInfo
+}
+
+func signatureReason(info signatures.SignatureInfo) (string, Severity) {
+	names := make([]string, 0, len(info.Sources))
+	sev := SevWarning
+	for _, src := range info.Sources {
+		names = append(names, src.Name)
+		if src.Confidence == signatures.ConfidenceHigh {
+			sev = SevCritical
+		}
+	}
+	if len(names) == 0 {
+		return "Signature match (local hash cache)", SevCritical
+	}
+	if sev == SevCritical {
+		return "Signature match from " + strings.Join(names, ", ") + " (known malware hash)", SevCritical
+	}
+	return "Payload hash match from " + strings.Join(names, ", ") + " (review before action)", SevWarning
+}
+
+// heuristics flags suspicious files without needing a signature.
+func heuristics(path string, info os.FileInfo) (string, Severity, bool) {
+	name := strings.ToLower(filepath.Base(path))
+
+	// Ransomware footprints: encrypted-file extensions and ransom notes.
+	if ransom.HasKnownExtension(name) {
+		return "Known ransomware extension (" + filepath.Ext(name) + ")", SevCritical, true
+	}
+	if ransom.IsRansomNote(name) {
+		return "Possible ransom note", SevCritical, true
+	}
+
+	// Double extension masquerading: report.pdf.exe, photo.jpg.scr ...
+	execExts := []string{".exe", ".scr", ".bat", ".cmd", ".com", ".pif", ".vbs", ".js"}
+	docExts := []string{".pdf", ".doc", ".docx", ".xls", ".xlsx", ".jpg", ".jpeg", ".png", ".txt", ".mp4", ".zip"}
+	for _, ee := range execExts {
+		if strings.HasSuffix(name, ee) {
+			base := strings.TrimSuffix(name, ee)
+			for _, de := range docExts {
+				if strings.HasSuffix(base, de) {
+					return "Double extension masquerade (" + de + ee + ")", SevCritical, true
+				}
+			}
+		}
+	}
+
+	// Executable hiding in a temp directory.
+	dir := strings.ToLower(filepath.Dir(path))
+	isTmp := strings.Contains(dir, "/tmp") || strings.Contains(dir, "\\temp") || strings.Contains(dir, "/var/folders")
+	if isTmp && info.Mode()&0o111 != 0 && info.Size() > 0 {
+		if strings.HasSuffix(name, ".sh") || strings.HasSuffix(name, ".command") || filepath.Ext(name) == "" {
+			return "Executable in temporary directory", SevWarning, true
+		}
+	}
+
+	// Hidden executable in user space (".foo" with exec bit).
+	if strings.HasPrefix(name, ".") && info.Mode()&0o111 != 0 && info.Size() > 0 &&
+		!strings.HasSuffix(name, ".sh") && runtime.GOOS != "windows" {
+		home, _ := os.UserHomeDir()
+		if home != "" && strings.HasPrefix(path, home) {
+			return "Hidden executable file", SevWarning, true
+		}
+	}
+
+	return "", SevInfo, false
+}
+
+// magic maps common document/media extensions to their valid leading bytes.
+var magic = map[string][][]byte{
+	".jpg":  {{0xFF, 0xD8, 0xFF}},
+	".jpeg": {{0xFF, 0xD8, 0xFF}},
+	".png":  {{0x89, 'P', 'N', 'G'}},
+	".gif":  {[]byte("GIF8")},
+	".pdf":  {[]byte("%PDF")},
+	".zip":  {[]byte("PK")},
+	".docx": {[]byte("PK")},
+	".xlsx": {[]byte("PK")},
+	".pptx": {[]byte("PK")},
+	".doc":  {{0xD0, 0xCF, 0x11, 0xE0}},
+	".xls":  {{0xD0, 0xCF, 0x11, 0xE0}},
+	".ppt":  {{0xD0, 0xCF, 0x11, 0xE0}},
+	".gz":   {{0x1F, 0x8B}},
+}
+
+// magicMismatch reports whether a file's extension expects a known header that
+// the actual bytes don't provide.
+func magicMismatch(path string, head []byte) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	sigs, ok := magic[ext]
+	if !ok || len(head) < 4 {
+		return false
+	}
+	for _, sig := range sigs {
+		if len(head) >= len(sig) && bytes.HasPrefix(head, sig) {
+			return false // matches a valid signature
+		}
+	}
+	return true
+}
+
+func skipDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", ".Trash", "Caches", "cache", ".cache",
+		"DerivedData", ".npm", ".cargo", "go", "Xcode", ".docker", "Photos Library.photoslibrary":
+		return true
+	}
+	return false
+}
+
+func sortThreats(threats []Threat) {
+	sort.SliceStable(threats, func(i, j int) bool {
+		if threats[i].Severity != threats[j].Severity {
+			return threats[i].Severity > threats[j].Severity
+		}
+		return threats[i].Path < threats[j].Path
+	})
+}
+
+func workerCount() int {
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if v := strings.TrimSpace(os.Getenv("AEGIS_SCAN_WORKERS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			workers = n
+		}
+	}
+	if workers < 1 {
+		return 1
+	}
+	if workers > 8 {
+		return 8
+	}
+	return workers
+}
+
+// ---- Quarantine ----
+
+// QuarantineRecord remembers where a quarantined file came from.
+type QuarantineRecord struct {
+	Original      string     `json:"original"`
+	OriginalBase  string     `json:"original_base,omitempty"`
+	SHA256        string     `json:"sha256"`
+	Reason        string     `json:"reason"`
+	Severity      string     `json:"severity,omitempty"`
+	When          time.Time  `json:"when"`
+	Stored        string     `json:"stored"`
+	Size          int64      `json:"size,omitempty"`
+	Mode          uint32     `json:"mode,omitempty"`
+	ModTime       time.Time  `json:"mod_time,omitempty"`
+	Encrypted     bool       `json:"encrypted,omitempty"`
+	FormatVersion int        `json:"format_version,omitempty"`
+	KeyID         string     `json:"key_id,omitempty"`
+	VaultHMAC     string     `json:"vault_hmac,omitempty"`
+	RecordHMAC    string     `json:"record_hmac,omitempty"`
+	Restored      bool       `json:"restored,omitempty"`
+	RestoredAt    *time.Time `json:"restored_at,omitempty"`
+	RestoredTo    string     `json:"restored_to,omitempty"`
+}
+
+type quarantineManifest struct {
+	Format        string    `json:"format"`
+	FormatVersion int       `json:"format_version"`
+	Original      string    `json:"original"`
+	OriginalBase  string    `json:"original_base"`
+	SHA256        string    `json:"sha256"`
+	Size          int64     `json:"size"`
+	Mode          uint32    `json:"mode"`
+	ModTime       time.Time `json:"mod_time"`
+	Reason        string    `json:"reason"`
+	Severity      string    `json:"severity"`
+	When          time.Time `json:"when"`
+	KeyID         string    `json:"key_id"`
+}
+
+type quarantineVault struct {
+	Version    int                `json:"version"`
+	Nonce      string             `json:"nonce"`
+	Ciphertext string             `json:"ciphertext"`
+	Manifest   quarantineManifest `json:"manifest"`
+	HMAC       string             `json:"hmac"`
+}
+
+type RestoreOptions struct {
+	OriginalLocation bool
+}
+
+const (
+	quarantineVaultFormat  = "aegis-quarantine-vault"
+	quarantineVaultVersion = 1
+	quarantineKeyFile      = "quarantine.key"
+)
+
+// Quarantine encrypts a file into the aegis quarantine vault, removes the
+// original only after the vault has been atomically written, and records signed
+// metadata. The stored name is content-addressed by the original file's SHA-256.
+func Quarantine(t Threat) (QuarantineRecord, error) {
+	src, err := cleanUserPath(t.Path)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	qdir, err := quarantineDir()
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	if err := os.MkdirAll(qdir, 0o700); err != nil {
+		return QuarantineRecord{}, err
+	}
+	if !safeFilesystemPathPattern.MatchString(src) {
+		return QuarantineRecord{}, errors.New("unsafe quarantine source path")
+	}
+	// codeql[go/path-injection]
+	// A user explicitly chooses the file to quarantine. cleanUserPath rejects
+	// NUL bytes and normalizes the source path before this stat.
+	info, err := os.Lstat(src)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return QuarantineRecord{}, fmt.Errorf("can only quarantine regular files")
+	}
+	if info.Size() > MaxFileSize {
+		return QuarantineRecord{}, fmt.Errorf("file is larger than quarantine limit (%d MiB)", MaxFileSize>>20)
+	}
+	// codeql[go/path-injection]
+	// src is normalized and checked above; the quarantine action is initiated
+	// by the user/TUI/GUI against this local file.
+	plain, err := os.ReadFile(src)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	sum := sha256.Sum256(plain)
+	id := hex.EncodeToString(sum[:])
+	if t.SHA256 != "" && !strings.EqualFold(t.SHA256, id) {
+		return QuarantineRecord{}, fmt.Errorf("source hash changed before quarantine")
+	}
+	if !isQuarantineID(id) {
+		return QuarantineRecord{}, fmt.Errorf("invalid quarantine id for %s", filepath.Base(src))
+	}
+	dest, err := uniqueQuarantinePath(qdir, id, ".aqv")
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	key, err := quarantineKey(qdir)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	now := time.Now().UTC()
+	vault, err := makeQuarantineVault(plain, quarantineManifest{
+		Format:        quarantineVaultFormat,
+		FormatVersion: quarantineVaultVersion,
+		Original:      src,
+		OriginalBase:  filepath.Base(src),
+		SHA256:        id,
+		Size:          info.Size(),
+		Mode:          uint32(info.Mode().Perm()),
+		ModTime:       info.ModTime().UTC(),
+		Reason:        t.Reason,
+		Severity:      t.Severity.String(),
+		When:          now,
+		KeyID:         keyID(key),
+	}, key)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	b, err := json.MarshalIndent(vault, "", "  ")
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	if err := writeAtomic(dest, b, 0o600); err != nil {
+		return QuarantineRecord{}, err
+	}
+	// codeql[go/path-injection]
+	// src was normalized and statted as a regular file before the encrypted
+	// vault write succeeded; removing it completes the quarantine operation.
+	if err := os.Remove(src); err != nil {
+		_ = os.Remove(dest)
+		return QuarantineRecord{}, err
+	}
+	// codeql[go/path-injection]
+	// dest is confined to the aegis quarantine directory by quarantinePath.
+	_ = os.Chmod(dest, 0o000)
+	rec := QuarantineRecord{
+		Original: src, OriginalBase: filepath.Base(src), SHA256: id, Reason: t.Reason,
+		Severity: t.Severity.String(), When: now, Stored: dest, Size: info.Size(),
+		Mode: uint32(info.Mode().Perm()), ModTime: info.ModTime().UTC(), Encrypted: true,
+		FormatVersion: quarantineVaultVersion, KeyID: keyID(key), VaultHMAC: vault.HMAC,
+	}
+	rec.RecordHMAC = signRecord(rec, key)
+	return rec, appendLog(qdir, rec)
+}
+
+func copyFile(src, dst string) error {
+	var err error
+	src, err = cleanUserPath(src)
+	if err != nil {
+		return err
+	}
+	dst, err = cleanUserPath(dst)
+	if err != nil {
+		return err
+	}
+	// codeql[go/path-injection]
+	// src is normalized by cleanUserPath; copyFile is
+	// only called by scan/quarantine restore paths that already validate intent.
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	// codeql[go/path-injection]
+	// dst is normalized by cleanUserPath and, for
+	// quarantine writes, constrained by quarantinePath.
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+func quarantineDir() (string, error) {
+	dir, err := signatures.Dir()
+	if err != nil {
+		return "", err
+	}
+	return cleanUserPath(filepath.Join(dir, "quarantine"))
+}
+
+func quarantineLogPath(qdir string) string {
+	p, err := quarantinePath(qdir, "quarantine.json")
+	if err != nil {
+		return filepath.Join(qdir, "quarantine.json")
+	}
+	return p
+}
+
+func quarantineRestoreDir(qdir string) (string, error) {
+	path := filepath.Join(qdir, "restored")
+	path, err := cleanUserPath(path)
+	if err != nil {
+		return "", err
+	}
+	if !pathInside(qdir, path) {
+		return "", fmt.Errorf("restore directory escapes quarantine directory")
+	}
+	return path, nil
+}
+
+func loadLog(qdir string) ([]QuarantineRecord, error) {
+	b, err := os.ReadFile(quarantineLogPath(qdir))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var recs []QuarantineRecord
+	if err := json.Unmarshal(b, &recs); err != nil {
+		return nil, err
+	}
+	key, keyErr := quarantineKey(qdir)
+	for _, rec := range recs {
+		if rec.RecordHMAC == "" {
+			continue // legacy record from pre-vault Aegis.
+		}
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		if !verifyRecord(rec, key) {
+			return nil, fmt.Errorf("quarantine log integrity check failed for %s", rec.Stored)
+		}
+	}
+	return recs, nil
+}
+
+func saveLog(qdir string, recs []QuarantineRecord) error {
+	key, err := quarantineKey(qdir)
+	if err != nil {
+		return err
+	}
+	for i := range recs {
+		recs[i].RecordHMAC = signRecord(recs[i], key)
+	}
+	b, err := json.MarshalIndent(recs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(quarantineLogPath(qdir), b, 0o600)
+}
+
+func appendLog(qdir string, rec QuarantineRecord) error {
+	recs, err := loadLog(qdir)
+	if err != nil {
+		return err
+	}
+	recs = append(recs, rec)
+	return saveLog(qdir, recs)
+}
+
+// QuarantineHistory returns recorded quarantine operations, newest first.
+func QuarantineHistory() ([]QuarantineRecord, error) {
+	qdir, err := quarantineDir()
+	if err != nil {
+		return nil, err
+	}
+	recs, err := loadLog(qdir)
+	if err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(recs)-1; i < j; i, j = i+1, j-1 {
+		recs[i], recs[j] = recs[j], recs[i]
+	}
+	return recs, nil
+}
+
+// Restore decrypts a quarantined file into a non-executable staging folder and
+// marks the record as restored. Use RestoreOriginal to opt into restoring to
+// the original path after review. Both modes verify signed metadata and content
+// hashes, refuse double restore and refuse overwrites.
+func Restore(idOrPath string) (QuarantineRecord, error) {
+	return RestoreWithOptions(idOrPath, RestoreOptions{})
+}
+
+// RestoreOriginal restores a quarantined file to its original location after
+// the same vault-integrity checks used by Restore.
+func RestoreOriginal(idOrPath string) (QuarantineRecord, error) {
+	return RestoreWithOptions(idOrPath, RestoreOptions{OriginalLocation: true})
+}
+
+func RestoreWithOptions(idOrPath string, opts RestoreOptions) (QuarantineRecord, error) {
+	qdir, err := quarantineDir()
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	recs, err := loadLog(qdir)
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	idx := -1
+	for i, r := range recs {
+		if r.Stored == idOrPath || (r.SHA256 != "" && strings.EqualFold(r.SHA256, idOrPath)) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return QuarantineRecord{}, fmt.Errorf("no quarantine record matches %q", idOrPath)
+	}
+	rec := recs[idx]
+	if rec.Restored {
+		if rec.RestoredAt != nil {
+			return rec, fmt.Errorf("already restored on %s", rec.RestoredAt.Format(time.RFC3339))
+		}
+		return rec, fmt.Errorf("already restored")
+	}
+	stored, err := cleanUserPath(rec.Stored)
+	if err != nil {
+		return rec, err
+	}
+	if !pathInside(qdir, stored) {
+		return rec, fmt.Errorf("refusing to restore quarantine record outside quarantine directory")
+	}
+	key, err := quarantineKey(qdir)
+	if err != nil {
+		return rec, err
+	}
+	target := ""
+	if rec.Encrypted || strings.HasSuffix(strings.ToLower(stored), ".aqv") {
+		plain, manifest, err := openQuarantineVault(stored, key)
+		if err != nil {
+			return rec, err
+		}
+		if !strings.EqualFold(manifest.SHA256, rec.SHA256) {
+			return rec, fmt.Errorf("quarantine manifest hash does not match log")
+		}
+		sum := sha256.Sum256(plain)
+		if !strings.EqualFold(hex.EncodeToString(sum[:]), rec.SHA256) {
+			return rec, fmt.Errorf("quarantine content hash verification failed")
+		}
+		target, err = restoreTarget(qdir, rec, opts)
+		if err != nil {
+			return rec, err
+		}
+		mode := os.FileMode(0o600)
+		if opts.OriginalLocation && rec.Mode != 0 {
+			mode = os.FileMode(rec.Mode).Perm()
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return rec, err
+		}
+		if err := writeAtomic(target, plain, mode); err != nil {
+			return rec, err
+		}
+		_ = os.Chtimes(target, time.Now(), rec.ModTime)
+		// codeql[go/path-injection]
+		// stored is verified inside quarantine and the vault has been decrypted
+		// and hash-verified into the target before removing the encrypted copy.
+		if err := os.Remove(stored); err != nil {
+			return rec, err
+		}
+	} else {
+		target, err = restoreLegacyQuarantine(qdir, stored, rec, opts)
+		if err != nil {
+			return rec, err
+		}
+	}
+	rec.Original, _ = cleanUserPath(rec.Original)
+	rec.Stored = stored
+	rec.RestoredTo = target
+	now := time.Now()
+	rec.Restored = true
+	rec.RestoredAt = &now
+	recs[idx] = rec
+	if err := saveLog(qdir, recs); err != nil {
+		return rec, err
+	}
+	return rec, nil
+}
+
+func makeQuarantineVault(plain []byte, manifest quarantineManifest, key []byte) (quarantineVault, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return quarantineVault{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return quarantineVault{}, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return quarantineVault{}, err
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		return quarantineVault{}, err
+	}
+	ciphertext := gcm.Seal(nil, nonce, plain, manifestJSON)
+	vault := quarantineVault{
+		Version:    quarantineVaultVersion,
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+		Manifest:   manifest,
+	}
+	vault.HMAC = signVault(vault, key)
+	return vault, nil
+}
+
+func openQuarantineVault(path string, key []byte) ([]byte, quarantineManifest, error) {
+	// codeql[go/path-injection]
+	// path is cleaned and verified to be inside the quarantine directory by the
+	// caller before opening.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	var vault quarantineVault
+	if err := json.Unmarshal(b, &vault); err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	if vault.Version != quarantineVaultVersion || vault.Manifest.Format != quarantineVaultFormat {
+		return nil, quarantineManifest{}, fmt.Errorf("unsupported quarantine vault format")
+	}
+	if !verifyVault(vault, key) {
+		return nil, quarantineManifest{}, fmt.Errorf("quarantine vault integrity check failed")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(vault.Nonce)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(vault.Ciphertext)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	manifestJSON, err := json.Marshal(vault.Manifest)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	plain, err := gcm.Open(nil, nonce, ciphertext, manifestJSON)
+	if err != nil {
+		return nil, quarantineManifest{}, err
+	}
+	return plain, vault.Manifest, nil
+}
+
+func restoreLegacyQuarantine(qdir, stored string, rec QuarantineRecord, opts RestoreOptions) (string, error) {
+	target, err := restoreTarget(qdir, rec, opts)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return "", err
+	}
+	// codeql[go/path-injection]
+	// stored is normalized and verified inside quarantine before permissions
+	// are relaxed for legacy pre-vault files.
+	if err := os.Chmod(stored, 0o600); err != nil {
+		return "", err
+	}
+	// codeql[go/path-injection]
+	// stored is inside quarantine and target is normalized; restore refuses to
+	// overwrite existing files.
+	if err := os.Rename(stored, target); err != nil {
+		if err2 := copyFile(stored, target); err2 != nil {
+			return "", err
+		}
+		// codeql[go/path-injection]
+		// stored is still the validated quarantine file after the cross-device
+		// copy fallback succeeds.
+		if err2 := os.Remove(stored); err2 != nil {
+			return "", err2
+		}
+	}
+	return target, nil
+}
+
+func restoreTarget(qdir string, rec QuarantineRecord, opts RestoreOptions) (string, error) {
+	if opts.OriginalLocation {
+		original, err := cleanUserPath(rec.Original)
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(original); err == nil {
+			return "", fmt.Errorf("refusing to overwrite existing file at %s", original)
+		}
+		return original, nil
+	}
+	restoreDir, err := quarantineRestoreDir(qdir)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(restoreDir, 0o700); err != nil {
+		return "", err
+	}
+	base := rec.OriginalBase
+	if base == "" {
+		base = filepath.Base(rec.Original)
+	}
+	base = safeRestoreBase(base)
+	prefix := rec.SHA256
+	if len(prefix) > 12 {
+		prefix = prefix[:12]
+	}
+	target, err := quarantinePath(filepath.Join(qdir, "restored"), prefix+"-"+base)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(target); err == nil {
+		return "", fmt.Errorf("refusing to overwrite existing restored file at %s", target)
+	}
+	return target, nil
+}
+
+func safeRestoreBase(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "." || name == string(os.PathSeparator) || name == "" {
+		return "quarantined-file"
+	}
+	name = strings.Map(func(r rune) rune {
+		if r == 0 || r == '/' || r == '\\' || r == ':' {
+			return '-'
+		}
+		return r
+	}, name)
+	return name
+}
+
+func uniqueQuarantinePath(qdir, id, ext string) (string, error) {
+	dest, err := quarantinePath(qdir, id+ext)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(dest); os.IsNotExist(err) {
+		return dest, nil
+	}
+	for i := 1; i < 1000; i++ {
+		dest, err = quarantinePath(qdir, fmt.Sprintf("%s-%d%s", id, i, ext))
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			return dest, nil
+		}
+	}
+	return "", fmt.Errorf("could not allocate unique quarantine vault path")
+}
+
+func quarantineKey(qdir string) ([]byte, error) {
+	path, err := quarantinePath(qdir, quarantineKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path)
+	if err == nil {
+		if len(b) != 32 {
+			return nil, fmt.Errorf("invalid quarantine key length")
+		}
+		return b, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	if err := writeAtomic(path, key, 0o600); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func keyID(key []byte) string {
+	sum := sha256.Sum256(key)
+	return hex.EncodeToString(sum[:8])
+}
+
+func signVault(v quarantineVault, key []byte) string {
+	v.HMAC = ""
+	b, _ := json.Marshal(v)
+	return signBytes(b, key)
+}
+
+func verifyVault(v quarantineVault, key []byte) bool {
+	expected := signVault(v, key)
+	return hmac.Equal([]byte(expected), []byte(v.HMAC))
+}
+
+func signRecord(rec QuarantineRecord, key []byte) string {
+	rec.RecordHMAC = ""
+	b, _ := json.Marshal(rec)
+	return signBytes(b, key)
+}
+
+func verifyRecord(rec QuarantineRecord, key []byte) bool {
+	expected := signRecord(rec, key)
+	return hmac.Equal([]byte(expected), []byte(rec.RecordHMAC))
+}
+
+func signBytes(b, key []byte) string {
+	derived := sha256.Sum256(append([]byte("aegis-quarantine-hmac-v1"), key...))
+	mac := hmac.New(sha256.New, derived[:])
+	mac.Write(b)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".aegis-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	_ = os.Chmod(tmpName, perm)
+	return os.Rename(tmpName, path)
+}
+
+func cleanUserPath(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	if strings.ContainsRune(path, 0) {
+		return "", errors.New("path contains NUL byte")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+func quarantinePath(qdir, name string) (string, error) {
+	qdir, err := cleanUserPath(qdir)
+	if err != nil {
+		return "", err
+	}
+	if name == "" || strings.ContainsRune(name, 0) || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("invalid quarantine filename %q", name)
+	}
+	path := filepath.Join(qdir, name)
+	if !pathInside(qdir, path) {
+		return "", fmt.Errorf("quarantine path escapes quarantine directory")
+	}
+	return path, nil
+}
+
+func pathInside(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".."
+}
+
+func isQuarantineID(s string) bool {
+	if len(s) != 32 && len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
