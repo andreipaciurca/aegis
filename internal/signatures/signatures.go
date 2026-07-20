@@ -394,15 +394,15 @@ func unzipFirst(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, f := range zr.File {
-		rc, err := f.Open()
-		if err != nil {
-			return nil, err
-		}
-		defer rc.Close()
-		return io.ReadAll(io.LimitReader(rc, 256<<20))
+	if len(zr.File) == 0 {
+		return nil, fmt.Errorf("empty zip archive")
 	}
-	return nil, fmt.Errorf("empty zip archive")
+	rc, err := zr.File[0].Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return io.ReadAll(io.LimitReader(rc, 256<<20))
 }
 
 func isSHA256Hex(s string) bool {

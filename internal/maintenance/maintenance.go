@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +16,11 @@ import (
 )
 
 const aegisLatestURL = "https://api.github.com/repos/andreipaciurca/aegis/releases/latest"
+
+// DefaultStartupInterval is how often automatic startup checks are allowed to
+// touch the network. Explicit checks (pressing u, aegis update, the GUI's
+// Update button) always call Startup directly and are never throttled.
+const DefaultStartupInterval = 30 * time.Minute
 
 type Report struct {
 	SignatureAdded int            `json:"signature_added"`
@@ -48,6 +55,65 @@ func Startup(ctx context.Context, db *signatures.DB, currentVersion string) Repo
 		r.LlamaError = err.Error()
 	}
 	return r
+}
+
+// StartupInterval reads AEGIS_STARTUP_CHECK_INTERVAL (a Go duration string,
+// e.g. "10m" or "1h") and falls back to DefaultStartupInterval. A value of
+// "0" disables throttling — every automatic check hits the network live,
+// matching the old always-on behavior.
+func StartupInterval() time.Duration {
+	v := strings.TrimSpace(os.Getenv("AEGIS_STARTUP_CHECK_INTERVAL"))
+	if v == "" {
+		return DefaultStartupInterval
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return DefaultStartupInterval
+	}
+	return d
+}
+
+type cacheEntry struct {
+	CheckedAt time.Time `json:"checked_at"`
+	Report    Report    `json:"report"`
+}
+
+func cachePath() (string, error) {
+	dir, err := signatures.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "maintenance_cache.json"), nil
+}
+
+// StartupCached runs Startup at most once per interval; a call made sooner
+// than that returns the cached report immediately with no network activity,
+// so launching aegis repeatedly in a short span (a dev/test loop, a busy
+// shell) doesn't refetch signatures and poll two GitHub endpoints every
+// single time. The signature count is always read fresh from db so a cached
+// report never shows a stale total even when the network calls are skipped.
+//
+// This is only for automatic startup checks (TUI/GUI launch). Anything the
+// user explicitly triggers — pressing u, aegis update, the GUI's Update
+// button — should call Startup directly so it's never stale on request.
+func StartupCached(ctx context.Context, db *signatures.DB, currentVersion string, interval time.Duration) Report {
+	path, pathErr := cachePath()
+	if pathErr == nil && interval > 0 {
+		if b, err := os.ReadFile(path); err == nil {
+			var entry cacheEntry
+			if json.Unmarshal(b, &entry) == nil && time.Since(entry.CheckedAt) < interval {
+				entry.Report.SignatureTotal = db.Count()
+				return entry.Report
+			}
+		}
+	}
+	report := Startup(ctx, db, currentVersion)
+	if pathErr == nil {
+		if b, err := json.MarshalIndent(cacheEntry{CheckedAt: time.Now(), Report: report}, "", "  "); err == nil {
+			_ = os.WriteFile(path, b, 0o600)
+		}
+	}
+	return report
 }
 
 func CheckAegisUpdate(ctx context.Context, currentVersion string) ReleaseStatus {

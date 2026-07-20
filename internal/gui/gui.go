@@ -462,7 +462,7 @@ func (s *Server) startMaintenance(ctx context.Context, version string) {
 	go func() {
 		runCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
-		report := maintenance.Startup(runCtx, s.db, version)
+		report := maintenance.StartupCached(runCtx, s.db, version, maintenance.StartupInterval())
 		s.maintenanceMu.Lock()
 		s.maintenance = &report
 		s.maintRunning = false

@@ -272,7 +272,7 @@ func startupMaintenance(db *signatures.DB) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		return startupMsg(maintenance.Startup(ctx, db, Version))
+		return startupMsg(maintenance.StartupCached(ctx, db, Version, maintenance.StartupInterval()))
 	}
 }
 
