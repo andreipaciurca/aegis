@@ -1,0 +1,67 @@
+name: Ready for review
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - Security
+      - CodeQL
+    types:
+      - completed
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  mark-ready:
+    name: Mark green PRs ready for review
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event == 'pull_request'
+
+    steps:
+      - name: Mark PR once every check is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "No pull request attached to this workflow run."
+            exit 0
+          fi
+
+          pr_json="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isDraft,statusCheckRollup)"
+          if [ "$(jq -r '.isDraft' <<<"$pr_json")" = "true" ]; then
+            echo "PR #$PR_NUMBER is draft; not marking ready."
+            exit 0
+          fi
+
+          pending_or_failed="$(
+            jq '[.statusCheckRollup[] |
+              . as $check |
+              select(
+                (($check.status // $check.state // "COMPLETED") != "COMPLETED") or
+                ((($check.conclusion // "SUCCESS") | IN("SUCCESS","SKIPPED","NEUTRAL")) | not)
+              )
+            ] | length' <<<"$pr_json"
+          )"
+          if [ "$pending_or_failed" != "0" ]; then
+            echo "PR #$PR_NUMBER still has pending or failing checks."
+            exit 0
+          fi
+
+          gh label create "ready-for-review" --repo "$REPO" \
+            --description "All automated checks passed; ready for human review." \
+            --color "2ea44f" 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "ready-for-review"
+
+          existing="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.user.type == "Bot" and (.body | contains("All automated checks passed"))) | .id' | head -1)"
+          if [ -z "$existing" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" \
+              --body "All automated checks passed. This PR is ready for human review."
+          fi
