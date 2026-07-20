@@ -1721,17 +1721,17 @@ func printAIThreatExplanations(threats []scanner.Threat) {
 		out, err := ai.Generate(ctx, cfg, ai.Request{System: ai.PromptWithNotes(ai.SecuritySystemPrompt()), Prompt: prompt})
 		cancel()
 		if err != nil {
-			fmt.Printf("  %s: AI unavailable: %v\n", t.Path, err)
+			fmt.Printf("  %s: AI unavailable; run `aegis ai status` for setup details.\n", aiDisplayPath(t.Path))
 			continue
 		}
-		fmt.Printf("\n[%s] %s\n%s\n", t.Severity, t.Path, out)
+		fmt.Printf("\n[%s] %s\n%s\n", t.Severity, aiDisplayPath(t.Path), out)
 	}
 }
 
 func threatPrompt(t scanner.Threat, cfg ai.Config) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Aegis flagged this file. Assess likely risk and false-positive likelihood.\n")
-	fmt.Fprintf(&b, "Path: %s\nSeverity: %s\nReason: %s\nSize: %d\nSHA256: %s\n", t.Path, t.Severity, t.Reason, t.Size, t.SHA256)
+	fmt.Fprintf(&b, "File: %s\nSeverity: %s\nReason: %s\nSize: %d\nSHA256: %s\n", aiDisplayPath(t.Path), t.Severity, t.Reason, t.Size, t.SHA256)
 	if cfg.PrivacyMode == "excerpt" {
 		if ex := safeExcerpt(t.Path, cfg.MaxExcerptBytes); ex != "" {
 			fmt.Fprintf(&b, "\nSmall printable excerpt:\n%s\n", ex)
@@ -1743,7 +1743,25 @@ func threatPrompt(t scanner.Threat, cfg ai.Config) string {
 	return b.String()
 }
 
+func aiDisplayPath(path string) string {
+	base := filepath.Base(filepath.Clean(path))
+	if base == "." || base == string(filepath.Separator) {
+		return "[redacted path]"
+	}
+	return base
+}
+
 func safeExcerpt(path string, maxBytes int) string {
+	if maxBytes <= 0 || strings.ContainsRune(path, 0) {
+		return ""
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	// codeql[go/path-injection]
+	// Optional AI excerpts only read a scanner finding
+	// path after rejecting NUL bytes, non-positive caps and non-regular files.
 	f, err := os.Open(path)
 	if err != nil {
 		return ""

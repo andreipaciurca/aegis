@@ -63,3 +63,26 @@ func TestMarkdownDocsAvoidStaleReleaseAndUIDetails(t *testing.T) {
 		t.Fatal("release signing docs should use generic release placeholders")
 	}
 }
+
+func TestMarkdownDocsHaveTableOfContents(t *testing.T) {
+	var files []string
+	for _, pattern := range []string{"*.md", filepath.Join("docs", "*.md")} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			t.Fatalf("glob %s: %v", pattern, err)
+		}
+		files = append(files, matches...)
+	}
+	if len(files) == 0 {
+		t.Fatal("expected markdown docs to exist")
+	}
+	for _, file := range files {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if !strings.Contains(string(body), "## Table of Contents") {
+			t.Fatalf("%s should include a Table of Contents", file)
+		}
+	}
+}

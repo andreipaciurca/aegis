@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/andreipaciurca/aegis/internal/ai"
 	"github.com/andreipaciurca/aegis/internal/netmon"
 	"github.com/andreipaciurca/aegis/internal/rules"
+	"github.com/andreipaciurca/aegis/internal/scanner"
 	"github.com/andreipaciurca/aegis/internal/signatures"
 )
 
@@ -68,6 +70,43 @@ func TestParseGUIFlagsHTTPS(t *testing.T) {
 	}
 	if flags.cert != "localhost.pem" || flags.key != "localhost-key.pem" || flags.socket != "aegis.sock" {
 		t.Fatalf("unexpected parsed flags: %+v", flags)
+	}
+}
+
+func TestThreatPromptRedactsParentDirectories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Secret Client", "invoice.pdf.exe")
+	prompt := threatPrompt(scanner.Threat{
+		Path:     path,
+		SHA256:   strings.Repeat("a", 64),
+		Reason:   "test",
+		Severity: scanner.SevCritical,
+		Size:     123,
+	}, ai.Config{PrivacyMode: "metadata"})
+	if strings.Contains(prompt, filepath.Dir(path)) || strings.Contains(prompt, "Secret Client") {
+		t.Fatalf("AI prompt leaked parent path:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "invoice.pdf.exe") {
+		t.Fatalf("AI prompt should keep filename context:\n%s", prompt)
+	}
+}
+
+func TestSafeExcerptRejectsUnsafeInput(t *testing.T) {
+	if got := safeExcerpt("bad\x00path", 32); got != "" {
+		t.Fatalf("expected NUL path excerpt to be empty, got %q", got)
+	}
+	dir := t.TempDir()
+	if got := safeExcerpt(dir, 32); got != "" {
+		t.Fatalf("expected directory excerpt to be empty, got %q", got)
+	}
+	file := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(file, []byte("plain text for analyst"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := safeExcerpt(file, 0); got != "" {
+		t.Fatalf("expected non-positive cap excerpt to be empty, got %q", got)
+	}
+	if got := safeExcerpt(file, 8); got != "plain te" {
+		t.Fatalf("unexpected excerpt %q", got)
 	}
 }
 

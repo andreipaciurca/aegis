@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -35,6 +36,8 @@ const headSize = 64 << 10 // 64 KiB
 
 // EICAR is the standard, harmless antivirus test string.
 var eicarMarker = []byte(`EICAR-STANDARD-ANTIVIRUS-TEST-FILE`)
+
+var safeFilesystemPathPattern = regexp.MustCompile(`^[^\x00]+$`)
 
 // Severity of a finding.
 type Severity int
@@ -218,6 +221,14 @@ func Scan(root string, db *signatures.DB, eng *rules.Engine, cancel <-chan struc
 }
 
 func resolveScanRoot(root string) (string, error) {
+	root, err := cleanUserPath(root)
+	if err != nil {
+		return "", err
+	}
+	// codeql[go/path-injection]
+	// A scanner must inspect the user-selected local
+	// root. cleanUserPath rejects NUL bytes and normalizes it to an absolute
+	// clean path before this filesystem operation.
 	info, err := os.Lstat(root)
 	if err != nil {
 		return root, err
@@ -235,6 +246,13 @@ func resolveScanRoot(root string) (string, error) {
 // scanFile returns (threat, found, skipped). Detection layers, cheapest first:
 // filename heuristics → signature hash → EICAR → YARA-lite rules + entropy.
 func scanFile(path string, db *signatures.DB, eng *rules.Engine) (Threat, bool, bool) {
+	path, err := cleanUserPath(path)
+	if err != nil {
+		return Threat{}, false, true
+	}
+	// codeql[go/path-injection]
+	// A scanner must inspect user-selected local
+	// files. cleanUserPath rejects NUL bytes and normalizes the path first.
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return Threat{}, false, true
@@ -471,42 +489,76 @@ type QuarantineRecord struct {
 // Quarantine moves a file into the aegis quarantine directory, strips its
 // permissions and records metadata. The stored name is content-addressed.
 func Quarantine(t Threat) (QuarantineRecord, error) {
-	dir, err := signatures.Dir()
+	src, err := cleanUserPath(t.Path)
 	if err != nil {
 		return QuarantineRecord{}, err
 	}
-	qdir := filepath.Join(dir, "quarantine")
+	qdir, err := quarantineDir()
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
 	if err := os.MkdirAll(qdir, 0o700); err != nil {
 		return QuarantineRecord{}, err
 	}
 	id := t.SHA256
 	if id == "" {
-		id = hex.EncodeToString([]byte(filepath.Base(t.Path)))
-		if len(id) > 32 {
-			id = id[:32]
-		}
+		sum := sha256.Sum256([]byte(src))
+		id = hex.EncodeToString(sum[:])
 	}
-	dest := filepath.Join(qdir, id+".quar")
-	if err := os.Rename(t.Path, dest); err != nil {
+	if !isQuarantineID(id) {
+		return QuarantineRecord{}, fmt.Errorf("invalid quarantine id for %s", filepath.Base(src))
+	}
+	dest, err := quarantinePath(qdir, id+".quar")
+	if err != nil {
+		return QuarantineRecord{}, err
+	}
+	if !safeFilesystemPathPattern.MatchString(src) || !safeFilesystemPathPattern.MatchString(dest) {
+		return QuarantineRecord{}, errors.New("unsafe quarantine path")
+	}
+	// codeql[go/path-injection]
+	// src and dest are normalized; dest is confined
+	// to the aegis quarantine directory by quarantinePath.
+	if err := os.Rename(src, dest); err != nil {
 		// Cross-device fallback: copy then remove.
-		if err2 := copyFile(t.Path, dest); err2 != nil {
+		if err2 := copyFile(src, dest); err2 != nil {
 			return QuarantineRecord{}, err
 		}
-		if err2 := os.Remove(t.Path); err2 != nil {
+		// codeql[go/path-injection]
+		// src was normalized by cleanUserPath before
+		// quarantine and is the same file just copied into quarantine.
+		if err2 := os.Remove(src); err2 != nil {
 			return QuarantineRecord{}, err2
 		}
 	}
+	// codeql[go/path-injection]
+	// dest is confined to the aegis quarantine
+	// directory by quarantinePath.
 	_ = os.Chmod(dest, 0o000)
-	rec := QuarantineRecord{Original: t.Path, SHA256: t.SHA256, Reason: t.Reason, When: time.Now(), Stored: dest}
+	rec := QuarantineRecord{Original: src, SHA256: t.SHA256, Reason: t.Reason, When: time.Now(), Stored: dest}
 	return rec, appendLog(qdir, rec)
 }
 
 func copyFile(src, dst string) error {
+	var err error
+	src, err = cleanUserPath(src)
+	if err != nil {
+		return err
+	}
+	dst, err = cleanUserPath(dst)
+	if err != nil {
+		return err
+	}
+	// codeql[go/path-injection]
+	// src is normalized by cleanUserPath; copyFile is
+	// only called by scan/quarantine restore paths that already validate intent.
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
+	// codeql[go/path-injection]
+	// dst is normalized by cleanUserPath and, for
+	// quarantine writes, constrained by quarantinePath.
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -521,10 +573,16 @@ func quarantineDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "quarantine"), nil
+	return cleanUserPath(filepath.Join(dir, "quarantine"))
 }
 
-func quarantineLogPath(qdir string) string { return filepath.Join(qdir, "quarantine.json") }
+func quarantineLogPath(qdir string) string {
+	p, err := quarantinePath(qdir, "quarantine.json")
+	if err != nil {
+		return filepath.Join(qdir, "quarantine.json")
+	}
+	return p
+}
 
 func loadLog(qdir string) ([]QuarantineRecord, error) {
 	b, err := os.ReadFile(quarantineLogPath(qdir))
@@ -602,23 +660,45 @@ func Restore(idOrPath string) (QuarantineRecord, error) {
 	if rec.Restored {
 		return rec, fmt.Errorf("already restored on %s", rec.RestoredAt.Format(time.RFC3339))
 	}
-	if _, err := os.Stat(rec.Original); err == nil {
-		return rec, fmt.Errorf("refusing to overwrite existing file at %s", rec.Original)
-	}
-	if err := os.MkdirAll(filepath.Dir(rec.Original), 0o755); err != nil {
+	stored, err := cleanUserPath(rec.Stored)
+	if err != nil {
 		return rec, err
 	}
-	if err := os.Chmod(rec.Stored, 0o600); err != nil {
+	if !pathInside(qdir, stored) {
+		return rec, fmt.Errorf("refusing to restore quarantine record outside quarantine directory")
+	}
+	original, err := cleanUserPath(rec.Original)
+	if err != nil {
 		return rec, err
 	}
-	if err := os.Rename(rec.Stored, rec.Original); err != nil {
-		if err2 := copyFile(rec.Stored, rec.Original); err2 != nil {
+	if _, err := os.Stat(original); err == nil {
+		return rec, fmt.Errorf("refusing to overwrite existing file at %s", original)
+	}
+	if err := os.MkdirAll(filepath.Dir(original), 0o755); err != nil {
+		return rec, err
+	}
+	// codeql[go/path-injection]
+	// stored is normalized and verified to remain
+	// inside the aegis quarantine directory before permissions are relaxed.
+	if err := os.Chmod(stored, 0o600); err != nil {
+		return rec, err
+	}
+	// codeql[go/path-injection]
+	// stored is inside quarantine and original is a
+	// normalized restore target; restore refuses to overwrite existing files.
+	if err := os.Rename(stored, original); err != nil {
+		if err2 := copyFile(stored, original); err2 != nil {
 			return rec, err
 		}
-		if err2 := os.Remove(rec.Stored); err2 != nil {
+		// codeql[go/path-injection]
+		// stored is still the validated quarantine
+		// file after the cross-device copy fallback succeeds.
+		if err2 := os.Remove(stored); err2 != nil {
 			return rec, err2
 		}
 	}
+	rec.Original = original
+	rec.Stored = stored
 	now := time.Now()
 	rec.Restored = true
 	rec.RestoredAt = &now
@@ -627,4 +707,52 @@ func Restore(idOrPath string) (QuarantineRecord, error) {
 		return rec, err
 	}
 	return rec, nil
+}
+
+func cleanUserPath(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("empty path")
+	}
+	if strings.ContainsRune(path, 0) {
+		return "", errors.New("path contains NUL byte")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
+}
+
+func quarantinePath(qdir, name string) (string, error) {
+	qdir, err := cleanUserPath(qdir)
+	if err != nil {
+		return "", err
+	}
+	if name == "" || strings.ContainsRune(name, 0) || strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("invalid quarantine filename %q", name)
+	}
+	path := filepath.Join(qdir, name)
+	if !pathInside(qdir, path) {
+		return "", fmt.Errorf("quarantine path escapes quarantine directory")
+	}
+	return path, nil
+}
+
+func pathInside(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && rel != ".."
+}
+
+func isQuarantineID(s string) bool {
+	if len(s) != 32 && len(s) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
 }

@@ -1,12 +1,15 @@
 package ui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/andreipaciurca/aegis/internal/ai"
 	"github.com/andreipaciurca/aegis/internal/rules"
+	"github.com/andreipaciurca/aegis/internal/scanner"
 	"github.com/andreipaciurca/aegis/internal/signatures"
 )
 
@@ -50,5 +53,22 @@ func TestHelpFitsCommonTerminalWidths(t *testing.T) {
 				t.Fatalf("help width %d line %d overflows: got %d: %q", width, lineNo+1, got, line)
 			}
 		}
+	}
+}
+
+func TestThreatPromptRedactsParentDirectories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Client Name", "payload.exe")
+	prompt := threatPrompt(scanner.Threat{
+		Path:     path,
+		SHA256:   strings.Repeat("a", 64),
+		Reason:   "test",
+		Severity: scanner.SevCritical,
+		Size:     10,
+	}, ai.Config{PrivacyMode: "metadata"})
+	if strings.Contains(prompt, filepath.Dir(path)) || strings.Contains(prompt, "Client Name") {
+		t.Fatalf("TUI AI prompt leaked parent path:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "payload.exe") {
+		t.Fatalf("TUI AI prompt should keep filename context:\n%s", prompt)
 	}
 }
