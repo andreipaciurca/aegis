@@ -37,10 +37,15 @@ are required for development.
 go vet ./...
 go test -race ./...
 gofmt -l .          # must print nothing
+go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 ```
 
 This is exactly what CI runs (`.github/workflows/ci.yml`), on Linux, macOS
-and Windows. If a change touches a Windows-only code path (`internal/persist`
+and Windows, plus CodeQL and `govulncheck` (`.github/workflows/codeql.yml`,
+`.github/workflows/security.yml`). Branch protection on `main` requires all
+of it green before a PR can merge — including for the repo owner, so there's
+no "just this once" direct push; go through a branch and a PR. If a change
+touches a Windows-only code path (`internal/persist`
 scheduled tasks/services, `internal/firewall`, `internal/checkup`), please
 say so in the PR description — CI will exercise it, but a human should know
 it wasn't hand-tested on real Windows.

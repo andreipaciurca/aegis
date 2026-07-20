@@ -12,7 +12,6 @@ var (
 	cRed     = lipgloss.Color("#f38ba8")
 	cYellow  = lipgloss.Color("#f9e2af")
 	cMauve   = lipgloss.Color("#cba6f7")
-	cPeach   = lipgloss.Color("#fab387")
 	cSurface = lipgloss.Color("#313244")
 	cCrust   = lipgloss.Color("#11111b")
 )
