@@ -559,9 +559,9 @@ aegis ai context
 aegis scan ~/Downloads --ai
 ```
 
-Claude and other hosted models can be connected today if they are exposed
-through an OpenAI-compatible gateway. A native Anthropic/MCP adapter is feasible
-but should be implemented as a separate backend with explicit permissions,
+Hosted models can be connected today if they are exposed through an
+OpenAI-compatible gateway. Native provider-specific or MCP adapters are feasible
+but should be implemented as separate backends with explicit permissions,
 provider-specific request formats and clear warnings before any host context is
 sent outside the machine.
 
