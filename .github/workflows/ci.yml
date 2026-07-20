@@ -34,6 +34,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Check GUI JavaScript runtime
+        run: node --version
+
       - name: Test
         run: go test -race ./...
 

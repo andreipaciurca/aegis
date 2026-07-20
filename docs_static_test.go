@@ -33,3 +33,33 @@ func TestStaticDocsAreLocalFileFriendly(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownDocsAvoidStaleReleaseAndUIDetails(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	readmeText := string(readme)
+	if strings.Contains(readmeText, "7 tabs") {
+		t.Fatal("README architecture should not hard-code the old TUI tab count")
+	}
+	for _, want := range []string{"responsive tabs", "Local browser GUI", "Release flow"} {
+		if !strings.Contains(readmeText, want) {
+			t.Fatalf("README missing expected current documentation marker %q", want)
+		}
+	}
+
+	releaseDocs, err := os.ReadFile(filepath.Join("docs", "RELEASE_SIGNING.md"))
+	if err != nil {
+		t.Fatalf("read RELEASE_SIGNING.md: %v", err)
+	}
+	releaseText := string(releaseDocs)
+	for _, stale := range []string{"v1.6.0", "aegis-1.6.0"} {
+		if strings.Contains(releaseText, stale) {
+			t.Fatalf("release signing docs still contain stale version example %q", stale)
+		}
+	}
+	if !strings.Contains(releaseText, "vX.Y.Z") || !strings.Contains(releaseText, "aegis-X.Y.Z") {
+		t.Fatal("release signing docs should use generic release placeholders")
+	}
+}
