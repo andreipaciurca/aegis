@@ -37,6 +37,26 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+  lint:
+    name: staticcheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+          install-go: false
+
   installer-syntax:
     name: Installer syntax
     runs-on: ubuntu-latest
