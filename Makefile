@@ -1,5 +1,5 @@
 BINARY  := aegis
-VERSION ?= 1.7.1
+VERSION ?= 1.7.2
 MODULE  := github.com/andreipaciurca/aegis
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
