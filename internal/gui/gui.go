@@ -57,6 +57,7 @@ type Server struct {
 	version       string
 	maintenanceMu sync.RWMutex
 	maintenance   *maintenance.Report
+	install       *maintenance.InstallResult
 	maintRunning  bool
 	onEvent       func(appsync.Event)
 	quitCh        chan struct{}
@@ -294,6 +295,9 @@ func (s *Server) startup(w http.ResponseWriter, r *http.Request) {
 		resp["error"] = isErr
 		resp["report"] = s.maintenance
 	}
+	if s.install != nil {
+		resp["install"] = s.install
+	}
 	writeJSON(w, resp)
 }
 
@@ -345,6 +349,7 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 
 	s.maintenanceMu.Lock()
 	s.maintenance = &report
+	s.install = install
 	s.maintRunning = false
 	s.maintenanceMu.Unlock()
 	text, isErr := maintenance.Summary(report)
@@ -1059,13 +1064,14 @@ let syncState='', syncLabel='syncing…', lastSyncAt='', startupTimer=null;
 function isoNow(){return new Date().toISOString()}
 function setSync(state,label,touch){syncState=state; syncLabel=label; if(!state && touch){lastSyncAt=isoNow()} renderSync()}
 function renderSync(){const dot=$('syncDot'); dot.className='dot'+(syncState?' '+syncState:''); $('syncOut').textContent=syncState?syncLabel:syncLabel+(lastSyncAt?' '+lastSyncAt:'')}
-function maintHTML(icon,report){
+function maintHTML(icon,report,install){
   if(!report){return icon}
   const parts=[];
   if(report.signature_error){parts.push('<span class="bad">signature update failed: '+esc(report.signature_error)+'</span>')}
   else{parts.push('signatures +'+report.signature_added+' ('+report.signature_total+' total)')}
   const ag=report.aegis||{};
   if(ag.error){parts.push('Aegis update check: '+esc(ag.error))}
+  else if(install&&install.installed){parts.push('<span class="warn">Aegis '+esc(install.version)+' installed · restart required</span>')}
   else if(ag.update){parts.push('<a href="'+esc(ag.release_url)+'" target="_blank" rel="noopener">Aegis '+esc(ag.latest)+' available</a>')}
   else if(ag.latest){parts.push('Aegis current')}
   if(report.llama_error){parts.push('llama.cpp check: '+esc(report.llama_error))}
@@ -1075,12 +1081,12 @@ function maintHTML(icon,report){
 }
 function installHTML(install){
   if(!install){return ''}
-  if(install.installed){return ' · installed '+esc(install.version)+', restart aegis to use it'}
+  if(install.installed){return ''}
   const hint=install.needs_sudo?' (needs elevated permissions — run sudo aegis update from a terminal)':'';
   return ' · <span class="bad">install failed: '+esc(install.error)+hint+'</span>';
 }
 async function refresh(opts){const manual=!!(opts&&opts.manual), touch=!!(opts&&opts.touch); if(manual||!lastSyncAt){setSync('busy','syncing…')} try{const s=await api('/api/status'); const encoded=JSON.stringify(s); const changed=encoded!==lastStatusJSON; if(changed){lastStatusJSON=encoded; renderStatus(s)} if(!startupTimer||manual||touch){setSync('','synced',!lastSyncAt||manual||touch)}}catch(e){$('cards').innerHTML='<div class="card"><div class="k">Status</div><div class="value bad">Failed</div><div class="muted small">'+esc(e.message)+'</div></div>'; setSync('err','sync failed')}}
-async function startup(){try{const s=await api('/api/startup'); const strip=$('startupOut'); if(s.running){strip.className='status-strip'; strip.textContent='Checking for Aegis updates, refreshing signatures, and checking llama.cpp…'; setSync('busy','startup checks…'); if(!startupTimer){startupTimer=setInterval(startup,1200)} return} if(startupTimer){clearInterval(startupTimer); startupTimer=null} const isErr=!!s.error; strip.className='status-strip '+(isErr?'err':'ok'); strip.innerHTML=maintHTML(isErr?'⚠':'✓',s.report)||'Startup checks complete.'; setDetails('Startup maintenance',s); await refresh({touch:true})}catch(e){if(startupTimer){clearInterval(startupTimer); startupTimer=null} $('startupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; setSync('err','startup check failed')}}
+async function startup(){try{const s=await api('/api/startup'); const strip=$('startupOut'); if(s.running){strip.className='status-strip'; strip.textContent='Checking for Aegis updates, refreshing signatures, and checking llama.cpp…'; setSync('busy','startup checks…'); if(!startupTimer){startupTimer=setInterval(startup,1200)} return} if(startupTimer){clearInterval(startupTimer); startupTimer=null} const isErr=!!s.error||!!(s.install&&s.install.error); strip.className='status-strip '+(isErr?'err':(s.install&&s.install.installed?'warn':'ok')); strip.innerHTML=maintHTML(isErr?'⚠':(s.install&&s.install.installed?'↻':'✓'),s.report,s.install)||'Startup checks complete.'; setDetails('Startup maintenance',s); await refresh({touch:true})}catch(e){if(startupTimer){clearInterval(startupTimer); startupTimer=null} $('startupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; setSync('err','startup check failed')}}
 function renderStatus(s){
   const score=s.health_score||0;
   $('scoreNum').textContent=score+'%';
@@ -1103,7 +1109,7 @@ async function scan(){const path=$('path').value.trim()||undefined; $('scanOut')
 let lastThreats=[];
 function renderScan(r){lastThreats=r.threats||[]; let html='<p><b>'+esc(r.scanned)+'</b> scanned · <b>'+esc(r.skipped)+'</b> skipped · '+esc(r.duration)+'</p>'; if(!lastThreats.length) return html+'<p class="ok">Clean. No signatures, rules, entropy, or ransomware patterns matched.</p>'; return html+lastThreats.map((t,i)=>{const sev=t.severity==='CRITICAL'?'bad':'warn'; return '<div class="item sev-'+sev+'" id="threat-'+i+'"><div class="item-head"><span class="who"><span class="pill '+sev+'">'+esc(t.severity)+'</span> '+esc(t.path)+'</span><button onclick="quarantineItem(this,'+i+')">Quarantine</button></div><div class="detail">'+esc(t.reason)+'</div></div>'}).join('')}
 async function quarantineItem(btn,i){const t=lastThreats[i]; if(!t){return} btn.disabled=true; btn.textContent='Quarantining...'; try{const r=await api('/api/quarantine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:t.path,sha256:t.sha256,reason:t.reason,severity:t.severity})}); if(r.error){throw new Error(r.error)} setDetails('Quarantine',r); btn.textContent='Quarantined'; btn.closest('.item').style.opacity='0.6'}catch(e){btn.disabled=false; btn.textContent='Quarantine'; alert('Quarantine failed: '+e.message)}}
-async function updateSigs(){const btn=$('headerUpdateBtn'); if(btn){btn.disabled=true; btn.textContent='Updating…'} setSync('busy','updating…'); $('scanOut').textContent='Updating signatures, checking Aegis/llama.cpp releases, and installing an update if one is available...'; try{const r=await api('/api/update',{method:'POST'}); $('scanOut').innerHTML=r.error?'<span class="bad">'+esc(r.error)+'</span>':'<span class="ok">'+maintHTML('',r.report)+installHTML(r.install)+'</span>'; setDetails('Maintenance update',r); await refresh({manual:true})}catch(e){$('scanOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; setSync('err','update failed')}finally{if(btn){btn.disabled=false; btn.textContent='Update'}}}
+async function updateSigs(){const btn=$('headerUpdateBtn'); if(btn){btn.disabled=true; btn.textContent='Updating…'} setSync('busy','updating…'); $('scanOut').textContent='Updating signatures, checking Aegis/llama.cpp releases, and installing an update if one is available...'; try{const r=await api('/api/update',{method:'POST'}); const isErr=!!r.error||!!(r.install&&r.install.error); const banner=maintHTML(isErr?'⚠':(r.install&&r.install.installed?'↻':'✓'),r.report,r.install)+installHTML(r.install); $('startupOut').className='status-strip '+(isErr?'err':(r.install&&r.install.installed?'warn':'ok')); $('startupOut').innerHTML=banner; $('scanOut').innerHTML=r.error?'<span class="bad">'+esc(r.error)+'</span>':'<span class="'+(isErr?'bad':'ok')+'">'+banner+'</span>'; setDetails('Maintenance update',r); await refresh({manual:true})}catch(e){$('scanOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'; setSync('err','update failed')}finally{if(btn){btn.disabled=false; btn.textContent='Update'}}}
 async function quitApp(){if(!confirm('Quit the Aegis GUI? This stops the local server on this machine.')){return} try{await api('/api/quit',{method:'POST'})}catch(e){} window.close(); setTimeout(function(){document.body.innerHTML='<div style="max-width:520px;margin:80px auto;text-align:center;color:var(--muted)"><p style="color:var(--text);font-size:16px;margin-bottom:8px">Aegis GUI stopped.</p><p>The local server has shut down. You can close this tab.</p></div>'},300)}
 async function shield(action){$('shieldOut').textContent='Working...'; try{const r=await api('/api/shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})}); setDetails('Ransom shield '+action,r); const events=r.events||[]; if(action==='deploy') $('shieldOut').innerHTML='<span class="ok">Armed '+(r.canaries?.length||0)+' canary files.</span>'; else if(action==='cleanup') $('shieldOut').innerHTML='Removed '+esc(r.removed||0)+' canary files.'; else $('shieldOut').innerHTML=events.length?events.map(renderEvent).join(''):'<span class="ok">No ransomware canary or sweep alerts.</span>'; await refresh()}catch(e){$('shieldOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderEvent(e){return '<div class="item sev-bad"><div class="item-head"><span class="who"><span class="pill bad">'+esc(e.severity||'ALERT')+'</span> '+esc(e.path)+'</span></div><div class="detail">'+esc(e.detail||e.kind)+'</div></div>'}
