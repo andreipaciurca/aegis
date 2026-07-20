@@ -49,6 +49,8 @@ type Server struct {
 	maintenance   *maintenance.Report
 	maintRunning  bool
 	onEvent       func(appsync.Event)
+	quitCh        chan struct{}
+	quitOnce      sync.Once
 }
 
 func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options) error {
@@ -56,7 +58,7 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 	if version == "" {
 		version = "dev"
 	}
-	srv := &Server{db: db, eng: eng, version: version, onEvent: opts.OnEvent}
+	srv := &Server{db: db, eng: eng, version: version, onEvent: opts.OnEvent, quitCh: make(chan struct{})}
 	mux := http.NewServeMux()
 	api := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, requireSameOrigin(h)) }
 	mux.HandleFunc("/", srv.index)
@@ -75,6 +77,7 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 	api("/api/ai/remember", srv.aiRemember)
 	api("/api/ai/setup", srv.aiSetup)
 	api("/api/startup", srv.startup)
+	api("/api/quit", srv.quit)
 	srv.startMaintenance(ctx, opts.Version)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -111,6 +114,14 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 			_ = os.Remove(opts.Socket)
 		}
 		return ctx.Err()
+	case <-srv.quitCh:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(shutdownCtx)
+		if sockLn != nil {
+			_ = os.Remove(opts.Socket)
+		}
+		return nil
 	case err := <-errCh:
 		if sockLn != nil {
 			_ = os.Remove(opts.Socket)
@@ -120,6 +131,19 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 		}
 		return err
 	}
+}
+
+// quit lets the browser UI stop the local server on request (the "Quit"
+// button) — the same as closing the terminal aegis gui/app was launched
+// from. quitOnce guards against a double-click sending the request twice
+// and panicking on a double close.
+func (s *Server) quit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+	s.quitOnce.Do(func() { close(s.quitCh) })
 }
 
 // listenUnixSocket binds a Unix domain socket at path for the local API.
@@ -246,18 +270,33 @@ func (s *Server) update(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 	report := maintenance.Startup(ctx, s.db, s.version)
+
+	var install *maintenance.InstallResult
+	if report.Aegis.Update {
+		res := maintenance.InstallUpdate(ctx, report.Aegis.Latest)
+		install = &res
+	}
+
 	s.maintenanceMu.Lock()
 	s.maintenance = &report
 	s.maintRunning = false
 	s.maintenanceMu.Unlock()
 	text, isErr := maintenance.Summary(report)
+	if install != nil {
+		if install.Installed {
+			text += " · installed " + install.Version + ", restart aegis to use it"
+		} else {
+			text += " · install failed: " + install.Error
+			isErr = true
+		}
+	}
 	s.emit("update", "GUI maintenance: "+text, isErr)
 	added := report.SignatureAdded
 	var err error
 	if report.SignatureError != "" {
 		err = fmt.Errorf("%s", report.SignatureError)
 	}
-	writeJSON(w, map[string]any{"added": added, "total": s.db.Count(), "error": errString(err), "summary": text, "report": report})
+	writeJSON(w, map[string]any{"added": added, "total": s.db.Count(), "error": errString(err), "summary": text, "report": report, "install": install})
 }
 
 func (s *Server) checkup(w http.ResponseWriter, r *http.Request) {
@@ -782,6 +821,8 @@ button:disabled{opacity:.5;cursor:default}
 button.primary{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:700}
 button.primary:hover{filter:brightness(1.08)}
 button.ghost{background:none}
+button.tiny{padding:4px 10px;font-size:11.5px;border-radius:999px}
+button.tiny.warn:hover{border-color:var(--red);color:var(--red)}
 
 input,textarea{width:100%;background:var(--panel2);border:1px solid var(--line2);border-radius:7px;color:var(--text);padding:10px 12px;font-size:13px}
 input:focus,textarea:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
@@ -797,6 +838,8 @@ pre{white-space:pre-wrap;overflow:auto;background:var(--bg);border:1px solid var
 .item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .item-head .who{min-width:0;overflow-wrap:anywhere}
 .item .detail{color:var(--muted);font-size:12.5px;margin-top:4px}
+
+code{background:var(--panel2);border:1px solid var(--line2);border-radius:5px;padding:1px 6px;font-size:.92em}
 
 .pill{display:inline-block;border-radius:5px;padding:2px 7px;font-size:10.5px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
 .pill.bad{background:rgba(243,139,168,.14);color:var(--red)}
@@ -823,7 +866,7 @@ footer a{color:var(--faint)}
 <header><div class="bar">
   <div class="brand"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z" stroke="currentColor" stroke-width="2"/></svg>AEGIS</div>
   <div class="sub">local browser GUI · same core as the TUI · 127.0.0.1 only</div>
-  <div class="sync"><span class="dot" id="syncDot"></span><span id="syncOut">syncing…</span></div>
+  <div class="sync"><button class="ghost tiny" id="headerUpdateBtn" onclick="updateSigs()">Update</button><span class="dot" id="syncDot"></span><span id="syncOut">syncing…</span><button class="ghost tiny warn" onclick="quitApp()" title="Stop the local server and close this tab">Quit</button></div>
 </div></header>
 <div class="status-strip" id="startupOut">Checking Aegis updates, refreshing signatures, and checking llama.cpp…</div>
 <nav class="tabs" id="nav"></nav>
@@ -938,9 +981,33 @@ function initNav(){ $('nav').innerHTML=views.map(v=>'<button id="nav-'+v+'" oncl
 function label(v){return {dashboard:'Dashboard',scan:'Scanner',shield:'Shield',network:'Network',firewall:'Firewall',audit:'Audit',checkup:'Checkup',ai:'AI',history:'History',details:'Details'}[v]||v}
 function navIcon(v){return {dashboard:'check',scan:'scan',shield:'shield',network:'net',firewall:'fw',audit:'audit',checkup:'check',ai:'ai',history:'hist',details:'code'}[v]||'code'}
 function showView(v){currentView=v; document.querySelectorAll('.view').forEach(function(el){el.classList.toggle('active', el.dataset.view===v)}); views.forEach(function(x){const b=$('nav-'+x); if(b) b.classList.toggle('active',x===v)})}
-function setSync(state,text){const dot=$('syncDot'); dot.className='dot'+(state?' '+state:''); $('syncOut').textContent=text}
-async function refresh(){setSync('busy','syncing…'); try{const s=await api('/api/status'); renderStatus(s); setSync('','synced '+new Date().toLocaleTimeString())}catch(e){$('cards').innerHTML='<div class="card"><div class="k">Status</div><div class="value bad">Failed</div><div class="muted small">'+esc(e.message)+'</div></div>'; setSync('err','sync failed')}}
-async function startup(){try{const s=await api('/api/startup'); const strip=$('startupOut'); if(s.running){strip.className='status-strip'; strip.textContent='Checking for Aegis updates, refreshing signatures, and checking llama.cpp…'} else {const isErr=!!s.error; strip.className='status-strip '+(isErr?'err':'ok'); strip.textContent=(isErr?'⚠ ':'✓ ')+(s.summary||'Startup checks complete.'); setDetails('Startup maintenance',s); await refresh()}}catch(e){$('startupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+let syncState='', syncLabel='syncing…';
+function setSync(state,label){syncState=state; syncLabel=label; tickClock()}
+function fmtClock(){try{return new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZoneName:'short'}).format(new Date())}catch(e){return new Date().toLocaleTimeString()}}
+function tickClock(){const dot=$('syncDot'); dot.className='dot'+(syncState?' '+syncState:''); $('syncOut').textContent=syncState?syncLabel:syncLabel+' '+fmtClock()}
+setInterval(tickClock,1000);
+function maintHTML(icon,report){
+  if(!report){return icon}
+  const parts=[];
+  if(report.signature_error){parts.push('<span class="bad">signature update failed: '+esc(report.signature_error)+'</span>')}
+  else{parts.push('signatures +'+report.signature_added+' ('+report.signature_total+' total)')}
+  const ag=report.aegis||{};
+  if(ag.error){parts.push('Aegis update check: '+esc(ag.error))}
+  else if(ag.update){parts.push('<a href="'+esc(ag.release_url)+'" target="_blank" rel="noopener">Aegis '+esc(ag.latest)+' available</a>')}
+  else if(ag.latest){parts.push('Aegis current')}
+  if(report.llama_error){parts.push('llama.cpp check: '+esc(report.llama_error))}
+  else if(report.llama && report.llama.tag){parts.push('<code><a href="'+esc(report.llama.release_url)+'" target="_blank" rel="noopener">llama.cpp '+esc(report.llama.tag)+'</a></code>')}
+  const line=parts.join(' · ');
+  return icon?icon+' '+line:line;
+}
+function installHTML(install){
+  if(!install){return ''}
+  if(install.installed){return ' · installed '+esc(install.version)+', restart aegis to use it'}
+  const hint=install.needs_sudo?' (needs elevated permissions — run sudo aegis update from a terminal)':'';
+  return ' · <span class="bad">install failed: '+esc(install.error)+hint+'</span>';
+}
+async function refresh(){setSync('busy','syncing…'); try{const s=await api('/api/status'); renderStatus(s); setSync('','synced')}catch(e){$('cards').innerHTML='<div class="card"><div class="k">Status</div><div class="value bad">Failed</div><div class="muted small">'+esc(e.message)+'</div></div>'; setSync('err','sync failed')}}
+async function startup(){try{const s=await api('/api/startup'); const strip=$('startupOut'); if(s.running){strip.className='status-strip'; strip.textContent='Checking for Aegis updates, refreshing signatures, and checking llama.cpp…'} else {const isErr=!!s.error; strip.className='status-strip '+(isErr?'err':'ok'); strip.innerHTML=maintHTML(isErr?'⚠':'✓',s.report); setDetails('Startup maintenance',s); await refresh()}}catch(e){$('startupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderStatus(s){
   const score=s.health_score||0;
   $('scoreNum').textContent=score+'%';
@@ -963,7 +1030,8 @@ async function scan(){const path=$('path').value.trim()||undefined; $('scanOut')
 let lastThreats=[];
 function renderScan(r){lastThreats=r.threats||[]; let html='<p><b>'+esc(r.scanned)+'</b> scanned · <b>'+esc(r.skipped)+'</b> skipped · '+esc(r.duration)+'</p>'; if(!lastThreats.length) return html+'<p class="ok">Clean. No signatures, rules, entropy, or ransomware patterns matched.</p>'; return html+lastThreats.map((t,i)=>{const sev=t.severity==='CRITICAL'?'bad':'warn'; return '<div class="item sev-'+sev+'" id="threat-'+i+'"><div class="item-head"><span class="who"><span class="pill '+sev+'">'+esc(t.severity)+'</span> '+esc(t.path)+'</span><button onclick="quarantineItem(this,'+i+')">Quarantine</button></div><div class="detail">'+esc(t.reason)+'</div></div>'}).join('')}
 async function quarantineItem(btn,i){const t=lastThreats[i]; if(!t){return} btn.disabled=true; btn.textContent='Quarantining...'; try{const r=await api('/api/quarantine',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:t.path,sha256:t.sha256,reason:t.reason,severity:t.severity})}); if(r.error){throw new Error(r.error)} setDetails('Quarantine',r); btn.textContent='Quarantined'; btn.closest('.item').style.opacity='0.6'}catch(e){btn.disabled=false; btn.textContent='Quarantine'; alert('Quarantine failed: '+e.message)}}
-async function updateSigs(){$('scanOut').textContent='Updating signatures and checking Aegis/llama.cpp releases...'; try{const r=await api('/api/update',{method:'POST'}); $('scanOut').innerHTML=r.error?'<span class="bad">'+esc(r.error)+'</span>':'<span class="ok">'+esc(r.summary||('Added '+r.added+' signatures; '+r.total+' total.'))+'</span>'; setDetails('Maintenance update',r); await refresh(); startup()}catch(e){$('scanOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function updateSigs(){const btn=$('headerUpdateBtn'); if(btn){btn.disabled=true; btn.textContent='Updating…'} $('scanOut').textContent='Updating signatures, checking Aegis/llama.cpp releases, and installing an update if one is available...'; try{const r=await api('/api/update',{method:'POST'}); $('scanOut').innerHTML=r.error?'<span class="bad">'+esc(r.error)+'</span>':'<span class="ok">'+maintHTML('',r.report)+installHTML(r.install)+'</span>'; setDetails('Maintenance update',r); await refresh(); startup()}catch(e){$('scanOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}finally{if(btn){btn.disabled=false; btn.textContent='Update'}}}
+async function quitApp(){if(!confirm('Quit the Aegis GUI? This stops the local server on this machine.')){return} try{await api('/api/quit',{method:'POST'})}catch(e){} window.close(); setTimeout(function(){document.body.innerHTML='<div style="max-width:520px;margin:80px auto;text-align:center;color:var(--muted)"><p style="color:var(--text);font-size:16px;margin-bottom:8px">Aegis GUI stopped.</p><p>The local server has shut down. You can close this tab.</p></div>'},300)}
 async function shield(action){$('shieldOut').textContent='Working...'; try{const r=await api('/api/shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})}); setDetails('Ransom shield '+action,r); const events=r.events||[]; if(action==='deploy') $('shieldOut').innerHTML='<span class="ok">Armed '+(r.canaries?.length||0)+' canary files.</span>'; else if(action==='cleanup') $('shieldOut').innerHTML='Removed '+esc(r.removed||0)+' canary files.'; else $('shieldOut').innerHTML=events.length?events.map(renderEvent).join(''):'<span class="ok">No ransomware canary or sweep alerts.</span>'; await refresh()}catch(e){$('shieldOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderEvent(e){return '<div class="item sev-bad"><div class="item-head"><span class="who"><span class="pill bad">'+esc(e.severity||'ALERT')+'</span> '+esc(e.path)+'</span></div><div class="detail">'+esc(e.detail||e.kind)+'</div></div>'}
 async function network(){$('networkOut').textContent='Refreshing network...'; try{const r=await api('/api/network'); setDetails('Network connections',r); const flagged=(r.connections||[]).filter(c=>c.suspect); $('networkOut').innerHTML=flagged.length?flagged.slice(0,12).map(c=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">FLAGGED</span> '+esc(c.proc)+' '+esc(c.pid)+'</span></div><div class="detail">'+esc(c.local)+' -> '+esc(c.remote||'listener')+' · '+esc(c.suspect)+'</div></div>').join(''):'<span class="ok">No risky network listeners or suspicious ports found.</span>'}catch(e){$('networkOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}

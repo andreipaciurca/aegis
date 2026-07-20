@@ -244,13 +244,15 @@ the record as restored. Refuses to run twice on the same record and refuses
 to overwrite a file that already exists at the original path. Find the ID to
 pass with aegis history, or in the TUI Scanner tab (press v, then x).`)
 	case "update":
-		fmt.Println(`aegis update [--json]
+		fmt.Println(`aegis update [--json] [--check-only]
 
-Refreshes malware signatures from public abuse.ch defensive feeds, and checks
-whether a newer aegis release or llama.cpp release is available — the same
-checks that run at TUI/GUI startup and on pressing u. aegis never
-self-replaces its own binary; if a newer release exists, this prints the
-release URL so you can re-run the install script or download it yourself.`)
+Refreshes malware signatures from public abuse.ch defensive feeds, checks
+whether a newer aegis release or llama.cpp release is available, and — unless
+--check-only is given — downloads and installs an available aegis update:
+verifies it against the release's published SHA256SUMS, then atomically
+replaces the running binary on disk. Restart aegis afterward to use it. Same
+checks that run at TUI/GUI startup and on pressing u. If the binary's
+directory isn't writable, re-run as 'sudo aegis update'.`)
 	default:
 		fmt.Fprintf(os.Stderr, "aegis: unknown help topic %q\n\n", topic)
 		usage()
@@ -752,25 +754,54 @@ func cliRestore(args []string) int {
 }
 
 func cliUpdate(db *signatures.DB, args []string) int {
-	_, jsonMode := splitJSON(args)
+	rest, jsonMode := splitJSON(args)
+	checkOnly := false
+	for _, a := range rest {
+		if a == "--check-only" {
+			checkOnly = true
+		}
+	}
 	if !jsonMode {
 		fmt.Println("checking for updates: signatures, aegis release, llama.cpp release")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	report := maintenance.Startup(ctx, db, ui.Version)
+
+	var install *maintenance.InstallResult
+	if report.Aegis.Update && !checkOnly {
+		r := maintenance.InstallUpdate(ctx, report.Aegis.Latest)
+		install = &r
+	}
+
 	if jsonMode {
-		encodeJSON(report)
-		if report.SignatureError != "" {
+		encodeJSON(struct {
+			maintenance.Report
+			Install *maintenance.InstallResult `json:"install,omitempty"`
+		}{Report: report, Install: install})
+		if report.SignatureError != "" || (install != nil && install.Error != "") {
 			return 1
 		}
 		return 0
 	}
+
 	text, isErr := maintenance.Summary(report)
 	fmt.Println(text)
 	if report.Aegis.Update {
 		fmt.Printf("→ aegis %s is available (you have %s): %s\n", report.Aegis.Latest, report.Aegis.Current, report.Aegis.ReleaseURL)
-		fmt.Println("  aegis does not self-replace; re-run the install script or download the release yourself.")
+		switch {
+		case checkOnly:
+			fmt.Println("  re-run without --check-only to install it")
+		case install.Installed:
+			fmt.Printf("  installed %s to %s — restart aegis to use it\n", install.Version, install.BinaryPath)
+		case install.NeedsSudo:
+			fmt.Println("  install failed (no write permission): re-run as 'sudo aegis update'")
+			isErr = true
+		default:
+			fmt.Println("  install failed: " + install.Error)
+			fmt.Println("  you can still install it yourself: re-run the install script or download the release directly")
+			isErr = true
+		}
 	}
 	if isErr {
 		return 1
