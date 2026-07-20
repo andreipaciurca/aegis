@@ -3,6 +3,7 @@ package scanner
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -186,8 +187,7 @@ func TestWorkerCountEnvCap(t *testing.T) {
 
 func TestQuarantineAndRestoreRoundTrip(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	setTestConfigHome(t, home)
 
 	src := filepath.Join(home, "Downloads", "invoice.pdf.exe")
 	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
@@ -209,6 +209,17 @@ func TestQuarantineAndRestoreRoundTrip(t *testing.T) {
 	if _, err := os.Stat(rec.Stored); err != nil {
 		t.Fatalf("stored file missing: %v", err)
 	}
+	if !strings.HasSuffix(rec.Stored, ".aqv") || !rec.Encrypted || rec.RecordHMAC == "" || rec.VaultHMAC == "" {
+		t.Fatalf("expected encrypted signed vault record, got %+v", rec)
+	}
+	_ = os.Chmod(rec.Stored, 0o600)
+	vaultBytes, err := os.ReadFile(rec.Stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(vaultBytes), "payload") {
+		t.Fatal("quarantine vault should not contain plaintext payload")
+	}
 
 	hist, err := QuarantineHistory()
 	if err != nil || len(hist) != 1 || hist[0].Restored {
@@ -222,8 +233,14 @@ func TestQuarantineAndRestoreRoundTrip(t *testing.T) {
 	if !restored.Restored || restored.RestoredAt == nil {
 		t.Fatalf("restore did not mark record as restored: %+v", restored)
 	}
-	if _, err := os.Stat(src); err != nil {
-		t.Fatalf("original file not restored: %v", err)
+	if restored.RestoredTo == "" || strings.Contains(restored.RestoredTo, string(filepath.Separator)+"Downloads"+string(filepath.Separator)) {
+		t.Fatalf("default restore should go to review folder, got %+v", restored)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("original file should stay absent after safe restore, got %v", err)
+	}
+	if got, err := os.ReadFile(restored.RestoredTo); err != nil || string(got) != "payload" {
+		t.Fatalf("review restore content mismatch: %q err=%v", got, err)
 	}
 	if _, err := os.Stat(rec.Stored); !os.IsNotExist(err) {
 		t.Fatal("quarantined copy should be gone after restore")
@@ -241,15 +258,104 @@ func TestQuarantineAndRestoreRoundTrip(t *testing.T) {
 	if err := os.WriteFile(rec2.Original, []byte("someone recreated this"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Restore(rec2.Stored); err == nil {
-		t.Fatal("expected restore to refuse overwriting an existing file")
+	if _, err := RestoreOriginal(rec2.Stored); err == nil {
+		t.Fatal("expected original restore to refuse overwriting an existing file")
+	}
+}
+
+func TestRestoreOriginalRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	setTestConfigHome(t, home)
+
+	src := writeTemp(t, filepath.Join(home, "Downloads", "false-positive.exe"), "payload")
+	sum := sha256.Sum256([]byte("payload"))
+	rec, err := Quarantine(Threat{Path: src, SHA256: hex.EncodeToString(sum[:]), Reason: "test", Severity: SevWarning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := RestoreOriginal(rec.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.RestoredTo != src {
+		t.Fatalf("expected original restore to %s, got %s", src, restored.RestoredTo)
+	}
+	if got, err := os.ReadFile(src); err != nil || string(got) != "payload" {
+		t.Fatalf("original restore content mismatch: %q err=%v", got, err)
+	}
+}
+
+func TestQuarantineVaultTamperIsRejected(t *testing.T) {
+	home := t.TempDir()
+	setTestConfigHome(t, home)
+
+	src := writeTemp(t, filepath.Join(home, "Downloads", "bad.exe"), "payload")
+	sum := sha256.Sum256([]byte("payload"))
+	rec, err := Quarantine(Threat{Path: src, SHA256: hex.EncodeToString(sum[:]), Reason: "test", Severity: SevCritical})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rec.Stored, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(rec.Stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vault quarantineVault
+	if err := json.Unmarshal(b, &vault); err != nil {
+		t.Fatal(err)
+	}
+	vault.HMAC = strings.Repeat("0", 64)
+	b, err = json.MarshalIndent(vault, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rec.Stored, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(rec.Stored); err == nil || !strings.Contains(err.Error(), "integrity check failed") {
+		t.Fatalf("expected vault tamper refusal, got %v", err)
+	}
+}
+
+func TestQuarantineLogTamperIsRejected(t *testing.T) {
+	home := t.TempDir()
+	setTestConfigHome(t, home)
+
+	src := writeTemp(t, filepath.Join(home, "Downloads", "bad.exe"), "payload")
+	sum := sha256.Sum256([]byte("payload"))
+	if _, err := Quarantine(Threat{Path: src, SHA256: hex.EncodeToString(sum[:]), Reason: "test", Severity: SevCritical}); err != nil {
+		t.Fatal(err)
+	}
+	qdir, err := quarantineDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recs []QuarantineRecord
+	b, err := os.ReadFile(quarantineLogPath(qdir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &recs); err != nil {
+		t.Fatal(err)
+	}
+	recs[0].Reason = "tampered"
+	b, err = json.MarshalIndent(recs, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(quarantineLogPath(qdir), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := QuarantineHistory(); err == nil || !strings.Contains(err.Error(), "log integrity check failed") {
+		t.Fatalf("expected log tamper refusal, got %v", err)
 	}
 }
 
 func TestQuarantineRejectsUnsafePathsAndIDs(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	setTestConfigHome(t, home)
 
 	if _, err := Quarantine(Threat{Path: "bad\x00path", Reason: "test"}); err == nil {
 		t.Fatal("expected quarantine to reject a path containing NUL")
@@ -263,8 +369,7 @@ func TestQuarantineRejectsUnsafePathsAndIDs(t *testing.T) {
 
 func TestRestoreRejectsStoredPathOutsideQuarantine(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	setTestConfigHome(t, home)
 
 	qdir, err := quarantineDir()
 	if err != nil {
@@ -298,6 +403,14 @@ func writeTemp(t *testing.T, path, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func setTestConfigHome(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 }
 
 func nowForTest() time.Time { return time.Unix(1, 0).UTC() }

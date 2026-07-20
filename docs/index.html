@@ -487,9 +487,9 @@
         <p><b>SHA-256 hashing</b> against a local signature database, an
            updatable <b>YARA-lite rule engine</b> (reverse shells, Mimikatz,
            PowerShell cradles, webshells, coinminers), and <b>entropy
-           analysis</b> for packed binaries. One key quarantines a threat —
-           <b>chmod 000</b>, JSON audit log — and <code>aegis restore</code>
-           undoes it if you were wrong; nothing is ever silently deleted.</p>
+           analysis</b> for packed binaries. One key quarantines a threat into
+           an <b>encrypted vault</b> with signed metadata; <code>aegis restore</code>
+           decrypts it into a safe review folder.</p>
         <span class="demo bad">✗ CRITICAL  loader.ps1 — PowerShell download-and-execute cradle</span>
       </div>
       <div class="pane">
@@ -650,7 +650,7 @@
     </div>
     <div class="pipe-tail">
       <div class="verdict clean">✓ clean<small>keep walking — nothing written, nothing touched</small></div>
-      <div class="verdict threat">✗ threat<small>reported with severity · one key to quarantine (chmod 000, audit-logged)</small></div>
+      <div class="verdict threat">✗ threat<small>reported with severity · one key to quarantine (encrypted, signed metadata)</small></div>
     </div>
   </section>
 
@@ -738,7 +738,7 @@ aegis ai chat</code>
         <tr><td><kbd>1</kbd>–<kbd>7</kbd> / <kbd>tab</kbd></td><td>switch panes</td></tr>
         <tr><td><kbd>u</kbd></td><td>update signatures, from anywhere</td></tr>
         <tr><td><kbd>s</kbd> <kbd>e</kbd> <kbd>c</kbd> + <kbd>x</kbd></td><td>scan · edit path · cancel · quarantine (Scanner)</td></tr>
-        <tr><td><kbd>v</kbd></td><td>view quarantine history · <kbd>x</kbd> restore a file (Scanner)</td></tr>
+        <tr><td><kbd>v</kbd></td><td>view quarantine history · <kbd>x</kbd> restore to review folder (Scanner)</td></tr>
         <tr><td><kbd>d</kbd> <kbd>c</kbd> <kbd>s</kbd> <kbd>m</kbd></td><td>deploy canaries · clear · sweep · monitor (Shield)</td></tr>
         <tr><td><kbd>k</kbd> <kbd>b</kbd></td><td>kill process · block port (Network)</td></tr>
         <tr><td><kbd>e</kbd> <kbd>d</kbd> <kbd>t</kbd></td><td>firewall enable · disable · stealth</td></tr>

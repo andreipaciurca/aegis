@@ -690,7 +690,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		return m, m.flash("restored → "+msg.rec.Original, false)
+		return m, m.flash("restored to review folder → "+msg.rec.RestoredTo, false)
 
 	case clearStatusMsg:
 		if msg.id == m.statusID {

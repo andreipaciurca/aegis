@@ -557,7 +557,7 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"record": rec, "error": err.Error()})
 		return
 	}
-	s.emit("restore", "GUI restored "+rec.Original, false)
+	s.emit("restore", "GUI restored to review folder "+rec.RestoredTo, false)
 	writeJSON(w, map[string]any{"record": rec, "error": ""})
 }
 
@@ -1017,7 +1017,7 @@ footer a{color:var(--faint)}
 
   <div class="panel view" data-view="history">
     <h2><span class="ic" data-ic="hist"></span>Quarantine History</h2>
-    <p class="muted">Every quarantined file, newest first. Restoring moves a file back to its original location; Aegis refuses to overwrite an existing file or restore the same record twice.</p>
+    <p class="muted">Every quarantined file, newest first. New quarantines are encrypted vaults with signed metadata. Restore decrypts to Aegis's safe review folder; use the CLI <code>--original</code> option only after review.</p>
     <div class="actions"><button class="primary" onclick="history_()">Refresh history</button></div>
     <div id="historyOut" class="muted" style="margin-top:14px">Press refresh to load quarantine history.</div>
   </div>
@@ -1138,10 +1138,11 @@ function renderHistory(recs){if(!recs.length){$('historyOut').innerHTML='<span c
   const id=esc(r.stored); const when=esc((r.when||'').replace('T',' ').slice(0,16));
   const status=r.restored?'<span class="pill ok">RESTORED</span>':'<span class="pill warn">QUARANTINED</span>';
   const action=r.restored?('<span class="muted small">restored '+esc((r.restored_at||'').replace('T',' ').slice(0,16))+'</span>')
-    :('<button onclick="restoreItem(this,\''+id.replace(/'/g,"\\'")+'\')">Restore</button>');
-  return '<div class="item sev-'+(r.restored?'ok':'warn')+'"><div class="item-head"><span class="who">'+status+' '+esc(r.original)+'</span>'+action+'</div><div class="detail">'+when+' · '+esc(r.reason)+'</div></div>';
+    :('<button onclick="restoreItem(this,\''+id.replace(/'/g,"\\'")+'\')">Restore to review</button>');
+  const restoredTo=r.restored_to?(' · restored to '+esc(r.restored_to)):'';
+  return '<div class="item sev-'+(r.restored?'ok':'warn')+'"><div class="item-head"><span class="who">'+status+' '+esc(r.original)+'</span>'+action+'</div><div class="detail">'+when+' · '+esc(r.reason)+restoredTo+'</div></div>';
 }).join('')}
-async function restoreItem(btn,id){btn.disabled=true; btn.textContent='Restoring...'; try{const r=await api('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); if(r.error){throw new Error(r.error)} setDetails('Restore',r); await history_()}catch(e){btn.disabled=false; btn.textContent='Restore'; alert('Restore failed: '+e.message)}}
+async function restoreItem(btn,id){btn.disabled=true; btn.textContent='Restoring...'; try{const r=await api('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); if(r.error){throw new Error(r.error)} setDetails('Restore',r); await history_()}catch(e){btn.disabled=false; btn.textContent='Restore to review'; alert('Restore failed: '+e.message)}}
 initNav(); refresh(); startup(); setInterval(refresh,4000);
 </script>
 </body>
