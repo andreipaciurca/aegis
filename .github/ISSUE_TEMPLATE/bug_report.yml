@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in aegis is broken or behaving unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found an exploitable vulnerability instead? Please don't file it here —
+        see [SECURITY.md](https://github.com/andreipaciurca/aegis/blob/main/SECURITY.md)
+        for a private reporting channel.
+
+  - type: input
+    id: version
+    attributes:
+      label: aegis version
+      description: Output of `aegis --version` (or the git commit if built from source)
+      placeholder: v1.5.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what actually happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) or TUI/GUI actions that trigger it
+      placeholder: |
+        1. aegis scan ~/Downloads
+        2. press 'x' on the first result
+        3. ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Terminal output, error text, or a screenshot. No need to paste huge scan results — a representative snippet is enough.
+      render: shell
+    validations:
+      required: false
