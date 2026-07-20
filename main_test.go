@@ -154,7 +154,7 @@ func TestCommandUsageTopicsAreHumanReadable(t *testing.T) {
 		"app":      {"aegis app", "TUI and local browser GUI"},
 		"analyze":  {"aegis analyze", "disk"},
 		"history":  {"aegis history", "quarantine"},
-		"restore":  {"aegis restore", "Undoes a quarantine"},
+		"restore":  {"aegis restore", "review folder"},
 		"update":   {"aegis update", "SHA256SUMS", "Restart aegis"},
 		"version":  {"aegis version", "installed aegis version"},
 	}

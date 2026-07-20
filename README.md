@@ -111,13 +111,13 @@ local llama.cpp analyst.
 - **Actionable remediation** — every finding suggests a fix: **kill a
   process** (with a confirm prompt), **block a port** at the native firewall,
   or **disable an autostart** entry — with the precise command shown.
-- **One-key quarantine, with an undo** — threats are moved to a locked-down
-  quarantine directory (`chmod 000`) with a JSON audit log; originals are
-  never silently deleted. `aegis history` lists everything ever quarantined;
-  `aegis restore <id>` (or `v` in the TUI Scanner tab, or the GUI's History
-  panel) moves a file back if it turns out to be a false positive. Restore
-  refuses to run twice on the same record and refuses to overwrite a file
-  that already exists at the original path.
+- **One-key encrypted quarantine, with review restore** — threats are sealed
+  into an AES-GCM `.aqv` vault with HMAC-signed metadata and an atomic audit
+  log; originals are removed only after the vault is written. `aegis history`
+  lists everything ever quarantined; `aegis restore <id>` (or `v` in the TUI
+  Scanner tab, or the GUI's History panel) decrypts into a safe review folder.
+  Use `aegis restore <id> --original` only after confirming a false positive.
+  Restore refuses to run twice and refuses to overwrite existing files.
 - **Maintenance updates** — press `u` in the TUI/paired app, click **Update &
   Check Versions** in the GUI, or run `aegis update` from a script (add
   `--json` for machine-readable output). All three refresh signatures *and*
@@ -238,7 +238,7 @@ flowchart TD
     magic -- yes --> threat
     magic -- no --> clean([✓ clean — nothing touched])
 
-    threat([✗ threat]) --> quar["quarantine on keypress<br/>chmod 000 · audit-logged"]
+    threat([✗ threat]) --> quar["quarantine on keypress<br/>encrypted vault · HMAC audit log"]
 
     classDef bad fill:#f38ba8,stroke:#f38ba8,color:#11111b;
     classDef good fill:#a6e3a1,stroke:#a6e3a1,color:#11111b;
@@ -335,7 +335,8 @@ aegis status              # one-shot summary of every subsystem
 aegis intel <sha256>      # optional VirusTotal reputation lookup
 aegis clamav ~/Downloads  # optional local ClamAV daemon scan
 aegis history             # list everything ever quarantined
-aegis restore <id>        # undo a quarantine (false positive? this reverses it)
+aegis restore <id>        # decrypt quarantine to a safe review folder
+aegis restore <id> --original  # restore to original path after false-positive review
 ```
 
 ClamAV bridge:
@@ -353,7 +354,7 @@ aegis clamav ~/Downloads --addr tcp://127.0.0.1:3310 --json
 | `1`–`7` / `tab` | switch tabs (Dashboard · Scanner · Shield · Network · Firewall · Audit · AI) |
 | `u` | update signatures (any tab) |
 | `s` / `e` / `c` · `↑↓` + `x` | scan · edit path · cancel · select + quarantine (Scanner) |
-| `v` (in Scanner) | view quarantine history · `↑↓` select · `x` restore |
+| `v` (in Scanner) | view quarantine history · `↑↓` select · `x` restore to review folder |
 | `d` / `c` / `s` / `m` | deploy canaries · clear · sweep now · real-time monitor (Shield) |
 | `↑↓` + `k` / `b` | select · kill process · block port (Network) |
 | `e` / `d` / `t` | enable · disable · stealth mode (Firewall) |
@@ -473,10 +474,10 @@ tools look much more suspicious to heuristic scanners.
 - **Reliability:** the scanner treats unreadable files as skips, never fatal;
   firewall, network and audit views degrade gracefully without root. Killing a
   process asks for confirmation first, because it can't be undone, and refuses
-  to touch PID ≤ 1 or aegis itself; quarantine doesn't need that gate because
-  it's reversible (`aegis restore`). Unit tests cover the rule engine, the
-  canary tamper detection, the quarantine/restore round trip, and the
-  persistence heuristics.
+  to touch PID ≤ 1 or aegis itself; quarantine is recoverable through the signed
+  vault flow (`aegis restore`) and restores into a review folder by default.
+  Unit tests cover the rule engine, canary tamper detection, encrypted
+  quarantine/restore, vault tamper rejection, and persistence heuristics.
 - **Platforms:** macOS first (Application Firewall + pf + lsof + LaunchAgents),
   then Linux (ufw/nftables/iptables + lsof + systemd/cron), then Windows
   (netsh + netstat + registry Run keys, Scheduled Tasks and auto-start

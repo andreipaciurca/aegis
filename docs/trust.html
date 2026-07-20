@@ -157,7 +157,7 @@ shasum -a 256 -c SHA256SUMS</code></pre>
   <p>Every capability that touches something outside the scan itself is
   explicit, not automatic:</p>
   <div class="cols">
-    <div class="card"><h3>Quarantine → restore</h3><p>Quarantine strips a file's permissions and logs it; <code>aegis restore</code> reverses it. Restore refuses to run twice or overwrite an existing file.</p></div>
+    <div class="card"><h3>Quarantine → review restore</h3><p>Quarantine seals a file in an encrypted vault with signed metadata. <code>aegis restore</code> decrypts to a safe review folder; <code>--original</code> is explicit and still refuses overwrites.</p></div>
     <div class="card"><h3>Process termination</h3><p>Requires confirmation in the TUI — unlike quarantine, it can't be undone. Refuses to target PID ≤ 1 or aegis itself.</p></div>
     <div class="card"><h3>Local browser GUI</h3><p>Binds to <code>127.0.0.1</code> only and checks every request's origin, so a webpage in another tab can't drive it silently.</p></div>
   </div>

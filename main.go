@@ -16,7 +16,7 @@
 //	aegis gui        local browser GUI
 //	aegis app        TUI + local browser GUI together
 //	aegis history    list quarantine history
-//	aegis restore ID undo a quarantine (by stored path or hash)
+//	aegis restore ID decrypt quarantine to a safe staging folder
 //	aegis update     refresh signatures, check for aegis/llama.cpp updates
 //	aegis status     one-shot security summary
 package main
@@ -151,7 +151,7 @@ advanced:
   clamav PATH           optional local ClamAV daemon scan
   analyze PATH          disk exposure summary
   history               quarantine history and restore IDs
-  restore ID            undo a quarantine (stored path or hash from history)
+  restore ID            decrypt quarantine to a safe staging folder
   version               print the installed aegis version
 
 try:
@@ -269,12 +269,13 @@ unexpectedly large folders before scanning.`)
 Shows quarantine history, newest first. Each record's "stored" path is the ID
 to pass to aegis restore.`)
 	case "restore":
-		fmt.Println(`aegis restore <stored-path|sha256> [--json]
+		fmt.Println(`aegis restore <stored-path|sha256> [--original] [--json]
 
-Undoes a quarantine: moves the file back to its original location and marks
-the record as restored. Refuses to run twice on the same record and refuses
-to overwrite a file that already exists at the original path. Find the ID to
-pass with aegis history, or in the TUI Scanner tab (press v, then x).`)
+Decrypts an encrypted quarantine vault into a non-executable review folder and
+marks the record as restored. Use --original only after review if you want to
+put the file back at its original path. Restore refuses to run twice and refuses
+to overwrite existing files. Find the ID to pass with aegis history, or in the
+TUI Scanner tab (press v, then x).`)
 	case "update":
 		fmt.Println(`aegis update [--json] [--check-only]
 
@@ -1132,11 +1133,27 @@ func cliHistory(args []string) int {
 
 func cliRestore(args []string) int {
 	args, jsonMode := splitJSON(args)
+	original := false
+	filtered := args[:0]
+	for _, a := range args {
+		if a == "--original" {
+			original = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	args = filtered
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: aegis restore <stored-path|sha256> [--json]")
+		fmt.Fprintln(os.Stderr, "usage: aegis restore <stored-path|sha256> [--original] [--json]")
 		return 2
 	}
-	rec, err := scanner.Restore(args[0])
+	var rec scanner.QuarantineRecord
+	var err error
+	if original {
+		rec, err = scanner.RestoreOriginal(args[0])
+	} else {
+		rec, err = scanner.Restore(args[0])
+	}
 	if err != nil {
 		if jsonMode {
 			encodeJSON(map[string]any{"error": err.Error()})
@@ -1149,7 +1166,12 @@ func cliRestore(args []string) int {
 		encodeJSON(rec)
 		return 0
 	}
-	fmt.Printf("restored %s\n", rec.Original)
+	if original {
+		fmt.Printf("restored to original path: %s\n", rec.RestoredTo)
+	} else {
+		fmt.Printf("restored to review folder: %s\n", rec.RestoredTo)
+		fmt.Println("review it before opening; use --original only when you are sure it is a false positive")
+	}
 	return 0
 }
 

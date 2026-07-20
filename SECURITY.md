@@ -54,10 +54,11 @@ or background service. It runs when invoked and exits when closed.
 
 Potentially sensitive actions are explicit:
 
-- quarantine moves a selected file into the aegis config directory (permissions
-  stripped) and records a JSON audit log; `aegis restore` or the TUI/GUI can
-  reverse it, but restore refuses to run twice on the same record or to
-  overwrite a file that already exists at the original path
+- quarantine seals a selected file into an encrypted `.aqv` vault in the aegis
+  config directory and records HMAC-signed metadata; `aegis restore` or the
+  TUI/GUI decrypts to a safe review folder, while `aegis restore --original`
+  is the explicit false-positive path. Restore refuses to run twice and refuses
+  to overwrite existing files
 - process termination requires user confirmation in the TUI, because unlike
   quarantine it cannot be undone; it also refuses to target PID ≤ 1 or aegis
   itself

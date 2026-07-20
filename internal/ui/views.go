@@ -98,7 +98,7 @@ func (m Model) viewFooter() string {
 			if m.editing {
 				keys = [][2]string{{"enter/esc", "done editing"}}
 			} else if m.quarantineView {
-				keys = [][2]string{{"↑↓", "select"}, {"x", "restore"}, {"r", "refresh"}, {"v/esc", "back to scanner"}}
+				keys = [][2]string{{"↑↓", "select"}, {"x", "restore to review"}, {"r", "refresh"}, {"v/esc", "back to scanner"}}
 			} else {
 				keys = [][2]string{{"s", "scan"}, {"e", "edit path"}, {"c", "cancel"},
 					{"↑↓", "select"}, {"x", "quarantine"}, {"v", "quarantine history"}}
@@ -283,7 +283,7 @@ func (m Model) viewHelp() string {
 			footerKeyStyle.Render("aegis --help") + dimStyle.Render(" or ") +
 			footerKeyStyle.Render("aegis help scan") + dimStyle.Render("."),
 		cardTitleStyle.Render("SAFETY MODEL") + "\n" +
-			dimStyle.Render(wrapText("Aegis reports first. Destructive actions confirm before running, quarantine changes file permissions instead of deleting, and optional AI explains findings but never overrides deterministic detections.", width-4, "")),
+			dimStyle.Render(wrapText("Aegis reports first. Destructive actions confirm before running, quarantine encrypts files into a signed vault, and optional AI explains findings but never overrides deterministic detections.", width-4, "")),
 	}
 	panel := panelStyle.Width(width).Render(strings.Join(sections, "\n\n"))
 	return "\n" + lipgloss.PlaceHorizontal(m.width, lipgloss.Center, panel)
@@ -460,8 +460,11 @@ func (m Model) viewQuarantine() string {
 		b.WriteString("\n  " + dimStyle.Render("reason: ") + textStyle.Render(r.Reason) + "\n")
 		if r.Restored && r.RestoredAt != nil {
 			b.WriteString("  " + dimStyle.Render("restored: ") + okStyle.Render(r.RestoredAt.Format("2006-01-02 15:04")) + "\n")
+			if r.RestoredTo != "" {
+				b.WriteString("  " + dimStyle.Render("to: ") + r.RestoredTo + "\n")
+			}
 		} else {
-			b.WriteString("  " + dimStyle.Render("press x to restore this file to its original location") + "\n")
+			b.WriteString("  " + dimStyle.Render("press x to decrypt into the safe review folder") + "\n")
 		}
 	}
 	return b.String()
