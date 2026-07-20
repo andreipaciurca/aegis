@@ -10,7 +10,7 @@
 
 aegis's scanner runs a small YARA-inspired rule engine
 (`internal/rules/rules.go`) as one layer of its scan pipeline (see the
-"How a scan works" diagram in the [README](../README.md#architecture)). Rules
+"Scan Pipeline" diagram in the [user guide](USER_GUIDE.md#scan-pipeline)). Rules
 ship built in, and you can add your own — or override a built-in one by
 reusing its name — without recompiling aegis.
 
