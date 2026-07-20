@@ -154,6 +154,13 @@ local llama.cpp analyst.
 - **Paired mode** — `aegis app` launches the TUI and local browser GUI from one
   process so both surfaces talk to the same scanner, signature database, rules
   engine and checkup/AI setup code.
+- **Local API over a Unix socket** — `aegis gui --socket PATH` (also works with
+  `aegis app`) additionally serves the same API on a Unix domain socket,
+  owner-only permissions, no TCP port, no browser tab — groundwork for a thin
+  native app shell (SwiftUI, GTK, …) to drive the existing Go core instead of
+  reimplementing detection logic per platform. Works on macOS and Linux, and
+  on Windows 10 1809+ / Server 2019+ where Go's `"unix"` network is backed by
+  native AF_UNIX; older Windows falls back to TCP only rather than failing.
 - **AI analyst** — privacy-first llama.cpp by default, plus an opt-in
   OpenAI-compatible backend for users who explicitly configure an API key. It
   explains findings, remembers approved local context and triages false
