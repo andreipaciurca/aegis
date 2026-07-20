@@ -215,13 +215,17 @@ provide; normal scans never call VirusTotal or upload files.`)
 Streams files to your own local clamd daemon with ClamAV INSTREAM. Install and
 start ClamAV yourself; Aegis does not bundle ClamAV or its databases.`)
 	case "gui":
-		fmt.Println(`aegis gui [--no-open]
+		fmt.Println(`aegis gui [--no-open] [--socket PATH]
 
-Starts the local browser GUI on 127.0.0.1 only. Use aegis app for TUI + GUI sync.`)
+Starts the local browser GUI on 127.0.0.1 only. Use aegis app for TUI + GUI sync.
+--socket also serves the API on a Unix domain socket at PATH, for a native app
+shell to talk to instead of opening a browser tab (macOS/Linux, and Windows
+10 1809+ / Server 2019+; older Windows falls back to TCP only).`)
 	case "app":
-		fmt.Println(`aegis app [--no-open]
+		fmt.Println(`aegis app [--no-open] [--socket PATH]
 
-Starts the TUI and local browser GUI together so GUI actions appear in the TUI.`)
+Starts the TUI and local browser GUI together so GUI actions appear in the TUI.
+--socket also serves the API on a Unix domain socket at PATH; see aegis gui --help.`)
 	case "analyze", "analyse":
 		fmt.Println(`aegis analyze [PATH] [--json]
 
@@ -629,14 +633,28 @@ func cliIntel(args []string) int {
 	return 0
 }
 
-func cliGUI(db *signatures.DB, eng *rules.Engine, args []string) int {
-	open := true
-	for _, a := range args {
-		if a == "--no-open" {
+// parseGUIFlags reads the flags shared by `aegis gui` and `aegis app`:
+// --no-open (skip launching a browser tab) and --socket <path> (also serve
+// the API on a Unix domain socket, for a future native app shell).
+func parseGUIFlags(args []string) (open bool, socket string) {
+	open = true
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--no-open":
 			open = false
+		case args[i] == "--socket" && i+1 < len(args):
+			i++
+			socket = args[i]
+		case strings.HasPrefix(args[i], "--socket="):
+			socket = strings.TrimPrefix(args[i], "--socket=")
 		}
 	}
-	if err := gui.Run(context.Background(), db, eng, gui.Options{OpenBrowser: open, Version: ui.Version}); err != nil && err != context.Canceled {
+	return open, socket
+}
+
+func cliGUI(db *signatures.DB, eng *rules.Engine, args []string) int {
+	open, socket := parseGUIFlags(args)
+	if err := gui.Run(context.Background(), db, eng, gui.Options{OpenBrowser: open, Version: ui.Version, Socket: socket}); err != nil && err != context.Canceled {
 		fmt.Fprintln(os.Stderr, "gui:", err)
 		return 1
 	}
@@ -644,12 +662,7 @@ func cliGUI(db *signatures.DB, eng *rules.Engine, args []string) int {
 }
 
 func cliApp(db *signatures.DB, eng *rules.Engine, args []string) int {
-	open := true
-	for _, a := range args {
-		if a == "--no-open" {
-			open = false
-		}
-	}
+	open, socket := parseGUIFlags(args)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -659,6 +672,7 @@ func cliApp(db *signatures.DB, eng *rules.Engine, args []string) int {
 		errCh <- gui.Run(ctx, db, eng, gui.Options{
 			OpenBrowser: open,
 			Version:     ui.Version,
+			Socket:      socket,
 			OnEvent: func(e appsync.Event) {
 				p.Send(e)
 			},
