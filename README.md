@@ -417,8 +417,8 @@ You can also publish an exact tag from the terminal:
 ```sh
 git checkout main
 git pull
-git tag -a v1.3.0 -m "aegis v1.3.0"
-git push origin v1.3.0
+git tag -a v1.6.0 -m "aegis v1.6.0"
+git push origin v1.6.0
 ```
 
 The release will contain `.tar.gz` archives for macOS/Linux, a `.zip` for

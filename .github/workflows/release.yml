@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional exact release tag, for example v1.2.3"
+        description: "Optional exact release tag, for example v1.6.0"
         required: false
       bump:
         description: "Version bump to compute when tag is empty"
