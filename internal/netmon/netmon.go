@@ -145,6 +145,9 @@ func port(addr string) string {
 func assess(c Conn) string {
 	rp := port(c.Remote)
 	lp := port(c.Local)
+	if trustedPlatformListener(c, lp) {
+		return ""
+	}
 	if why, ok := riskyPorts[rp]; ok {
 		return "remote " + rp + ": " + why
 	}
@@ -161,4 +164,14 @@ func assess(c Conn) string {
 		}
 	}
 	return ""
+}
+
+func trustedPlatformListener(c Conn, lp string) bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	if c.Proc != "ControlCe" {
+		return false
+	}
+	return lp == "5000" || lp == "7000"
 }

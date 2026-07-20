@@ -3,8 +3,10 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/andreipaciurca/aegis/internal/netmon"
 	"github.com/andreipaciurca/aegis/internal/rules"
 	"github.com/andreipaciurca/aegis/internal/signatures"
 )
@@ -42,5 +44,28 @@ func TestHelpFlagDetection(t *testing.T) {
 	}
 	if isHelpFlag("--json") {
 		t.Fatal("--json should not be a help flag")
+	}
+}
+
+func TestNetworkHintsWindowsIncludeCommandPromptFallbacks(t *testing.T) {
+	h := networkHints(netmon.Conn{PID: "1234", Local: "0.0.0.0:4444", Suspect: "listening on 4444"}, "windows")
+	joined := strings.Join(append(h.Explore, h.Stop...), "\n")
+	for _, want := range []string{"PowerShell:", "Command Prompt: netstat", "Command Prompt: tasklist", "Command Prompt: taskkill"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("network hints missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestParseGUIFlagsHTTPS(t *testing.T) {
+	flags := parseGUIFlags([]string{"--no-open", "--https", "--cert", "localhost.pem", "--key=localhost-key.pem", "--socket", "aegis.sock"})
+	if flags.open {
+		t.Fatal("--no-open should disable browser opening")
+	}
+	if !flags.https {
+		t.Fatal("--https should enable HTTPS")
+	}
+	if flags.cert != "localhost.pem" || flags.key != "localhost-key.pem" || flags.socket != "aegis.sock" {
+		t.Fatalf("unexpected parsed flags: %+v", flags)
 	}
 }

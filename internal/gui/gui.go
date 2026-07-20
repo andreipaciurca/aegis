@@ -2,8 +2,15 @@ package gui
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +36,9 @@ import (
 type Options struct {
 	OpenBrowser bool
 	Version     string
+	HTTPS       bool
+	CertFile    string
+	KeyFile     string
 	OnEvent     func(appsync.Event)
 	// Socket, when set, additionally serves the API (not the HTML page) on a
 	// Unix domain socket at this path — for a native app shell (SwiftUI,
@@ -84,15 +94,36 @@ func Run(ctx context.Context, db *signatures.DB, eng *rules.Engine, opts Options
 	if err != nil {
 		return err
 	}
-	url := "http://" + ln.Addr().String()
+	scheme := "http"
+	if opts.HTTPS {
+		scheme = "https"
+	}
+	url := scheme + "://" + ln.Addr().String()
 	fmt.Println("Aegis GUI:", url)
 	if opts.OpenBrowser {
 		_ = openBrowser(url)
 	}
 
 	httpSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	if opts.HTTPS {
+		cert, err := loadOrCreateLocalCert(opts.CertFile, opts.KeyFile)
+		if err != nil {
+			_ = ln.Close()
+			return err
+		}
+		httpSrv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+		if opts.CertFile == "" || opts.KeyFile == "" {
+			fmt.Println("Aegis GUI: using a temporary self-signed localhost certificate; your browser may warn.")
+		}
+	}
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.Serve(ln) }()
+	go func() {
+		if opts.HTTPS {
+			errCh <- httpSrv.ServeTLS(ln, "", "")
+			return
+		}
+		errCh <- httpSrv.Serve(ln)
+	}()
 
 	var sockLn net.Listener
 	if opts.Socket != "" {
@@ -168,6 +199,37 @@ func listenUnixSocket(path string) (net.Listener, error) {
 	return ln, nil
 }
 
+func loadOrCreateLocalCert(certFile, keyFile string) (tls.Certificate, error) {
+	if certFile != "" && keyFile != "" {
+		return tls.LoadX509KeyPair(certFile, keyFile)
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "aegis localhost"},
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
 // requireSameOrigin blocks the well-known "a webpage open in another tab
 // silently calls your localhost tool" pattern. The GUI binds to 127.0.0.1
 // with no login (it's a single-user local tool), so this is the cheap
@@ -194,7 +256,11 @@ func sameOriginOrTrusted(r *http.Request) bool {
 	if origin == "" {
 		return true // no Origin header at all: not a cross-origin browser fetch
 	}
-	return origin == "http://"+r.Host
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return origin == scheme+"://"+r.Host
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
@@ -322,7 +388,7 @@ func (s *Server) network(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.emit("network", fmt.Sprintf("GUI refreshed network: %d connection(s), %d flagged", len(conns), flagged), flagged > 0)
-	writeJSON(w, map[string]any{"connections": conns, "flagged": flagged, "error": errString(err)})
+	writeJSON(w, map[string]any{"connections": conns, "flagged": flagged, "error": errString(err), "os": runtime.GOOS})
 }
 
 func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
@@ -759,7 +825,7 @@ const indexHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>aegis — GUI</title>
+<title>aegis</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2311111b'/%3E%3Cpath fill='%23cba6f7' d='M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z'/%3E%3C/svg%3E">
 <style>
 :root{color-scheme:dark;--bg:#11111b;--panel:#1e1e2e;--panel2:#181825;--line:#313244;--line2:#45475a;--text:#cdd6f4;--muted:#9399b2;--faint:#6c7086;--accent:#cba6f7;--ink:#11111b;--green:#a6e3a1;--red:#f38ba8;--yellow:#f9e2af;--blue:#89b4fa}
@@ -771,11 +837,13 @@ a{color:var(--blue)}
 .ic svg{width:1em;height:1em;vertical-align:-0.15em}
 
 header{position:sticky;top:0;background:rgba(17,17,27,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);z-index:3}
-.bar{max-width:1180px;margin:0 auto;padding:13px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.bar{max-width:1180px;margin:0 auto;padding:13px 20px;display:grid;grid-template-columns:auto minmax(180px,1fr) auto;gap:10px 14px;align-items:center}
 .brand{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:var(--ink);font-weight:800;padding:4px 10px;border-radius:6px;letter-spacing:.02em}
 .brand svg{width:14px;height:14px}
-.sub{color:var(--faint);font-size:12.5px}
-.sync{margin-left:auto;display:inline-flex;align-items:center;gap:7px;color:var(--faint);font-size:12px}
+.sub{color:var(--faint);font-size:12.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sync{justify-self:end;display:inline-flex;align-items:center;gap:8px;color:var(--faint);font-size:12px;min-width:0}
+.sync-status{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-width:31ch;border:1px solid var(--line);background:var(--panel2);border-radius:999px;padding:4px 9px;white-space:nowrap}
+#syncOut{font-variant-numeric:tabular-nums}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex:none}
 .dot.busy{background:var(--yellow);animation:pulse 1.1s ease-in-out infinite}
 .dot.err{background:var(--red)}
@@ -821,7 +889,7 @@ button:disabled{opacity:.5;cursor:default}
 button.primary{background:var(--accent);color:var(--ink);border-color:var(--accent);font-weight:700}
 button.primary:hover{filter:brightness(1.08)}
 button.ghost{background:none}
-button.tiny{padding:4px 10px;font-size:11.5px;border-radius:999px}
+button.tiny{padding:4px 10px;font-size:11.5px;border-radius:999px;min-height:30px;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap}
 button.tiny.warn:hover{border-color:var(--red);color:var(--red)}
 
 input,textarea{width:100%;background:var(--panel2);border:1px solid var(--line2);border-radius:7px;color:var(--text);padding:10px 12px;font-size:13px}
@@ -840,6 +908,11 @@ pre{white-space:pre-wrap;overflow:auto;background:var(--bg);border:1px solid var
 .item .detail{color:var(--muted);font-size:12.5px;margin-top:4px}
 
 code{background:var(--panel2);border:1px solid var(--line2);border-radius:5px;padding:1px 6px;font-size:.92em}
+.cmd-row{display:grid;grid-template-columns:72px minmax(0,1fr);gap:8px;align-items:start;margin-top:7px;color:var(--faint);font-size:12px}
+.cmd-row code{display:block;overflow:auto;white-space:nowrap;color:var(--green);padding:4px 7px}
+.check-list{margin:8px 0 0;padding-left:18px;color:var(--muted)}
+.check-list li{margin:3px 0;overflow-wrap:anywhere}
+.check-summary{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 12px}
 
 .pill{display:inline-block;border-radius:5px;padding:2px 7px;font-size:10.5px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
 .pill.bad{background:rgba(243,139,168,.14);color:var(--red)}
@@ -859,14 +932,15 @@ footer a{color:var(--faint)}
 .repo-link svg{width:14px;height:14px}
 
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.why-grid{grid-template-columns:1fr}}
-@media(max-width:540px){.grid{grid-template-columns:1fr}.value{font-size:17px}.bar{align-items:flex-start}main{padding-inline:14px}.actions button{width:100%}.hero-score{flex-direction:column;align-items:flex-start}.hero-score .num{font-size:32px}}
+@media(max-width:700px){.bar{grid-template-columns:auto minmax(0,1fr)}.sub{white-space:normal}.sync{grid-column:1/-1;justify-self:stretch;justify-content:space-between;flex-wrap:wrap}.sync-status{flex:1;min-width:22ch}.cmd-row{grid-template-columns:1fr}.cmd-row code{white-space:pre-wrap;overflow-wrap:anywhere}}
+@media(max-width:540px){.grid{grid-template-columns:1fr}.value{font-size:17px}main{padding-inline:14px}.actions button{width:100%}.hero-score{flex-direction:column;align-items:flex-start}.hero-score .num{font-size:32px}}
 </style>
 </head>
 <body>
 <header><div class="bar">
   <div class="brand"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z" stroke="currentColor" stroke-width="2"/></svg>AEGIS</div>
   <div class="sub">local browser GUI · same core as the TUI · 127.0.0.1 only</div>
-  <div class="sync"><button class="ghost tiny" id="headerUpdateBtn" onclick="updateSigs()">Update</button><span class="dot" id="syncDot"></span><span id="syncOut">syncing…</span><button class="ghost tiny warn" onclick="quitApp()" title="Stop the local server and close this tab">Quit</button></div>
+  <div class="sync"><button class="ghost tiny" id="headerUpdateBtn" onclick="updateSigs()">Update</button><span class="sync-status"><span class="dot" id="syncDot"></span><span id="syncOut">syncing…</span></span><button class="ghost tiny warn" onclick="quitApp()" title="Stop the local server and close this tab">Quit</button></div>
 </div></header>
 <div class="status-strip" id="startupOut">Checking Aegis updates, refreshing signatures, and checking llama.cpp…</div>
 <nav class="tabs" id="nav"></nav>
@@ -887,7 +961,7 @@ footer a{color:var(--faint)}
     <h2><span class="ic" data-ic="scan"></span>Scanner</h2>
     <p class="muted">Scan a folder or file with the same hash, rule, entropy, extension, and EICAR checks used by the TUI. Quarantine a finding directly from the results below.</p>
     <input id="path" placeholder="Path to scan, e.g. ~/Downloads or /tmp">
-    <div class="actions"><button class="primary" onclick="scan()">Scan path</button><button onclick="updateSigs()">Update &amp; check versions</button><button class="ghost" onclick="refresh()">Refresh status</button></div>
+    <div class="actions"><button class="primary" onclick="scan()">Scan path</button><button onclick="updateSigs()">Update &amp; check versions</button><button class="ghost" onclick="refresh({manual:true})">Refresh status</button></div>
     <div id="scanOut" class="muted" style="margin-top:14px">Choose a folder or file and run a scan.</div>
   </div>
 
@@ -959,7 +1033,7 @@ footer a{color:var(--faint)}
 <script>
 document.getElementById('year').textContent=new Date().getFullYear();
 const $=id=>document.getElementById(id);
-let lastJSON='', currentView='dashboard';
+let lastJSON='', lastStatusJSON='', currentView='dashboard';
 const views=['dashboard','scan','shield','network','firewall','audit','checkup','ai','history','details'];
 const ICONS={
  shield:'<svg viewBox="0 0 24 24" fill="none"><path d="M12 3 20 6v6c0 5-3 8-8 11-5-3-8-6-8-11V6l8-3Z" stroke="currentColor" stroke-width="2"/></svg>',
@@ -981,11 +1055,10 @@ function initNav(){ $('nav').innerHTML=views.map(v=>'<button id="nav-'+v+'" oncl
 function label(v){return {dashboard:'Dashboard',scan:'Scanner',shield:'Shield',network:'Network',firewall:'Firewall',audit:'Audit',checkup:'Checkup',ai:'AI',history:'History',details:'Details'}[v]||v}
 function navIcon(v){return {dashboard:'check',scan:'scan',shield:'shield',network:'net',firewall:'fw',audit:'audit',checkup:'check',ai:'ai',history:'hist',details:'code'}[v]||'code'}
 function showView(v){currentView=v; document.querySelectorAll('.view').forEach(function(el){el.classList.toggle('active', el.dataset.view===v)}); views.forEach(function(x){const b=$('nav-'+x); if(b) b.classList.toggle('active',x===v)})}
-let syncState='', syncLabel='syncing…';
-function setSync(state,label){syncState=state; syncLabel=label; tickClock()}
-function fmtClock(){try{return new Intl.DateTimeFormat(undefined,{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZoneName:'short'}).format(new Date())}catch(e){return new Date().toLocaleTimeString()}}
-function tickClock(){const dot=$('syncDot'); dot.className='dot'+(syncState?' '+syncState:''); $('syncOut').textContent=syncState?syncLabel:syncLabel+' '+fmtClock()}
-setInterval(tickClock,1000);
+let syncState='', syncLabel='syncing…', lastSyncAt='';
+function isoNow(){return new Date().toISOString()}
+function setSync(state,label,touch){syncState=state; syncLabel=label; if(!state && touch){lastSyncAt=isoNow()} renderSync()}
+function renderSync(){const dot=$('syncDot'); dot.className='dot'+(syncState?' '+syncState:''); $('syncOut').textContent=syncState?syncLabel:syncLabel+(lastSyncAt?' '+lastSyncAt:'')}
 function maintHTML(icon,report){
   if(!report){return icon}
   const parts=[];
@@ -1006,7 +1079,7 @@ function installHTML(install){
   const hint=install.needs_sudo?' (needs elevated permissions — run sudo aegis update from a terminal)':'';
   return ' · <span class="bad">install failed: '+esc(install.error)+hint+'</span>';
 }
-async function refresh(){setSync('busy','syncing…'); try{const s=await api('/api/status'); renderStatus(s); setSync('','synced')}catch(e){$('cards').innerHTML='<div class="card"><div class="k">Status</div><div class="value bad">Failed</div><div class="muted small">'+esc(e.message)+'</div></div>'; setSync('err','sync failed')}}
+async function refresh(opts){const manual=!!(opts&&opts.manual); if(manual||!lastSyncAt){setSync('busy','syncing…')} try{const s=await api('/api/status'); const encoded=JSON.stringify(s); const changed=encoded!==lastStatusJSON; if(changed){lastStatusJSON=encoded; renderStatus(s)} setSync('','synced',!lastSyncAt||manual)}catch(e){$('cards').innerHTML='<div class="card"><div class="k">Status</div><div class="value bad">Failed</div><div class="muted small">'+esc(e.message)+'</div></div>'; setSync('err','sync failed')}}
 async function startup(){try{const s=await api('/api/startup'); const strip=$('startupOut'); if(s.running){strip.className='status-strip'; strip.textContent='Checking for Aegis updates, refreshing signatures, and checking llama.cpp…'} else {const isErr=!!s.error; strip.className='status-strip '+(isErr?'err':'ok'); strip.innerHTML=maintHTML(isErr?'⚠':'✓',s.report); setDetails('Startup maintenance',s); await refresh()}}catch(e){$('startupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderStatus(s){
   const score=s.health_score||0;
@@ -1034,13 +1107,21 @@ async function updateSigs(){const btn=$('headerUpdateBtn'); if(btn){btn.disabled
 async function quitApp(){if(!confirm('Quit the Aegis GUI? This stops the local server on this machine.')){return} try{await api('/api/quit',{method:'POST'})}catch(e){} window.close(); setTimeout(function(){document.body.innerHTML='<div style="max-width:520px;margin:80px auto;text-align:center;color:var(--muted)"><p style="color:var(--text);font-size:16px;margin-bottom:8px">Aegis GUI stopped.</p><p>The local server has shut down. You can close this tab.</p></div>'},300)}
 async function shield(action){$('shieldOut').textContent='Working...'; try{const r=await api('/api/shield',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})}); setDetails('Ransom shield '+action,r); const events=r.events||[]; if(action==='deploy') $('shieldOut').innerHTML='<span class="ok">Armed '+(r.canaries?.length||0)+' canary files.</span>'; else if(action==='cleanup') $('shieldOut').innerHTML='Removed '+esc(r.removed||0)+' canary files.'; else $('shieldOut').innerHTML=events.length?events.map(renderEvent).join(''):'<span class="ok">No ransomware canary or sweep alerts.</span>'; await refresh()}catch(e){$('shieldOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderEvent(e){return '<div class="item sev-bad"><div class="item-head"><span class="who"><span class="pill bad">'+esc(e.severity||'ALERT')+'</span> '+esc(e.path)+'</span></div><div class="detail">'+esc(e.detail||e.kind)+'</div></div>'}
-async function network(){$('networkOut').textContent='Refreshing network...'; try{const r=await api('/api/network'); setDetails('Network connections',r); const flagged=(r.connections||[]).filter(c=>c.suspect); $('networkOut').innerHTML=flagged.length?flagged.slice(0,12).map(c=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">FLAGGED</span> '+esc(c.proc)+' '+esc(c.pid)+'</span></div><div class="detail">'+esc(c.local)+' -> '+esc(c.remote||'listener')+' · '+esc(c.suspect)+'</div></div>').join(''):'<span class="ok">No risky network listeners or suspicious ports found.</span>'}catch(e){$('networkOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function network(){$('networkOut').textContent='Refreshing network...'; try{const r=await api('/api/network'); setDetails('Network connections',r); const flagged=(r.connections||[]).filter(c=>c.suspect); $('networkOut').innerHTML=flagged.length?flagged.slice(0,12).map(c=>renderNetworkFinding(c,r.os)).join(''):'<span class="ok">No risky network listeners or suspicious ports found.</span>'}catch(e){$('networkOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+function localPort(c){const s=String(c.local||''); const m=s.match(/:(\d+)$/); return m?m[1]:''}
+function networkWhy(c){if((c.suspect||'').includes('all interfaces')){return 'This process is accepting connections from the whole machine/network, not only localhost. That can be normal for Apple services, dev servers, media tools, or device sync, but it is worth checking if you did not expect it.'} if((c.suspect||'').includes('remote')){return 'The remote port is historically associated with remote shells, admin tools, or old botnet control channels. Confirm the destination and owning process before trusting it.'} return 'Aegis matched a network heuristic. Treat this as a lead to investigate, not proof of malware.'}
+function networkCommands(c,os){const p=localPort(c), pid=String(c.pid||'').replace(/[^0-9]/g,''); if(os==='windows'){const checks=[]; if(p){checks.push('PowerShell: Get-NetTCPConnection -LocalPort '+p+' | Select-Object LocalAddress,LocalPort,State,OwningProcess'); checks.push('Command Prompt: netstat -ano | findstr :'+p)} if(pid){checks.push('PowerShell: Get-Process -Id '+pid); checks.push('Command Prompt: tasklist /FI "PID eq '+pid+'"')} else {checks.push('Command Prompt: tasklist')} return {check:checks, fix:pid?['PowerShell: Stop-Process -Id '+pid+' -Force','Command Prompt: taskkill /PID '+pid+' /F']:[]}} const checks=[]; if(os==='linux'&&p){checks.push(\"ss -ltnp 'sport = :\"+p+\"'\")} if(p){checks.push('lsof -nP -iTCP:'+p+' -sTCP:LISTEN')} if(pid){checks.push('ps -p '+pid+' -o pid,ppid,user,comm,args'); checks.push('lsof -nP -p '+pid+' -iTCP')} const fixes=pid?['kill '+pid, 'sudo kill -9 '+pid]:[]; return {check:checks, fix:fixes}}
+function renderNetworkFinding(c,os){const cmds=networkCommands(c,os); let html='<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">FLAGGED</span> '+esc(c.proc)+' '+esc(c.pid)+'</span></div><div class="detail">'+esc(c.local)+' -> '+esc(c.remote||'listener')+' · '+esc(c.suspect)+'</div><div class="detail">'+esc(networkWhy(c))+'</div>'; if(cmds.check.length){html+='<h3>Explore first</h3>'+commandRows('Check',cmds.check)} if(cmds.fix.length){html+='<h3>At your own risk</h3><div class="detail warn">Only stop the process if you recognize it as unwanted or you are prepared to restart the app/service.</div>'+commandRows('Stop',cmds.fix)} return html+'</div>'}
 async function firewallStatus(){$('firewallOut').textContent='Checking firewall...'; try{const r=await api('/api/firewall'); setDetails('Firewall status',r); $('firewallOut').innerHTML=renderFirewall(r)}catch(e){$('firewallOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 function renderFirewall(r){const on=r.enabled; let html='<p class="'+(on?'ok':'bad')+'">'+(on?'● Enabled':'○ Disabled')+'</p><p class="muted">'+esc(r.backend||'unknown backend'); if(r.stealth_mode) html+=' · stealth '+esc(r.stealth_mode); if(r.rule_count) html+=' · '+esc(r.rule_count)+' rules'; html+='</p>'; if(r.detail) html+='<p class="muted small">'+esc(r.detail)+'</p>'; return html}
 async function firewallAction(action){$('firewallOut').textContent='Applying...'; try{const r=await api('/api/firewall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})}); setDetails('Firewall '+action,r); $('firewallOut').innerHTML=r.error?'<span class="bad">'+esc(r.error)+'</span>':renderFirewall(r.status); await refresh()}catch(e){$('firewallOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function audit(){$('auditOut').textContent='Running persistence audit...'; try{const r=await api('/api/audit'); setDetails('Persistence audit',r); const bad=(r.entries||[]).filter(e=>e.suspect); $('auditOut').innerHTML=bad.length?bad.map(e=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">SUSPICIOUS</span> '+esc(e.label)+'</span></div><div class="detail">'+esc(e.suspect)+' · '+esc(e.command)+'</div></div>').join(''):'<span class="ok">No suspicious startup entries found across supported locations.</span>'}catch(e){$('auditOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function checkup(){$('checkupOut').textContent='Checking OS updates, dependency updates, and vulnerability feeds...'; try{const r=await api('/api/checkup'); setDetails('System checkup',r); $('checkupOut').innerHTML=renderCheckup(r)}catch(e){$('checkupOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
-function renderCheckup(r){const checks=[...(r.updates||[]),...(r.dependencies||[])]; const warn=checks.filter(c=>c.status==='warn').length, err=checks.filter(c=>c.status==='error').length; let html='<p><b>'+esc(r.os?.name||r.os?.goos)+'</b> '+esc(r.os?.version||'')+' · '+warn+' warning checks · '+err+' errors.</p>'; html+=checks.map(c=>'<div class="item sev-'+(c.status==='ok'?'ok':c.status==='warn'?'warn':'bad')+'"><div class="item-head"><span class="who"><span class="pill '+(c.status==='ok'?'ok':c.status==='warn'?'warn':'bad')+'">'+esc(c.status)+'</span> '+esc(c.name)+'</span></div><div class="detail">'+esc(c.summary)+'</div></div>').join(''); const kev=r.vulnerabilities?.recent_kev?.length||0, nvd=r.vulnerabilities?.recent_critical?.length||0; html+='<p class="'+(kev||nvd?'warn':'ok')+'" style="margin-top:12px">'+kev+' recent CISA KEV · '+nvd+' recent critical NVD CVEs.</p>'; return html}
+function formatISO(v){if(!v){return 'unknown time'} const d=new Date(v); return Number.isNaN(d.getTime())?String(v):d.toISOString()}
+function severity(status){return status==='ok'?'ok':status==='warn'?'warn':'bad'}
+function commandRows(label,commands){return (commands||[]).filter(Boolean).map(cmd=>'<div class="cmd-row"><span>'+esc(label)+'</span><code>'+esc(cmd)+'</code></div>').join('')}
+function renderCheckCard(c){const sev=severity(c.status); let html='<div class="item sev-'+sev+'"><div class="item-head"><span class="who"><span class="pill '+sev+'">'+esc(c.status||'unknown')+'</span> '+esc(c.name)+'</span><span class="muted small">'+esc(c.duration||'')+'</span></div><div class="detail">'+esc(c.summary)+'</div>'; if(c.command){html+=commandRows('Check', [c.command])} if(c.status!=='ok'&&(c.remediation||[]).length){html+=commandRows('Fix', c.remediation)} if((c.items||[]).length){html+='<ul class="check-list">'+c.items.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'} if(c.error){html+='<div class="detail bad">error: '+esc(c.error)+'</div>'} return html+'</div>'}
+function renderCheckup(r){const checks=[...(r.updates||[]),...(r.dependencies||[])]; const warn=checks.filter(c=>c.status==='warn').length, err=checks.filter(c=>c.status==='error').length; let html='<div class="check-summary"><span><b>'+esc(r.os?.name||r.os?.goos)+'</b> '+esc(r.os?.version||'')+'</span><span class="'+(warn?'warn':'ok')+'">'+warn+' warnings</span><span class="'+(err?'bad':'ok')+'">'+err+' errors</span><span class="muted">collected '+esc(formatISO(r.collected_at))+'</span></div>'; const fixes=checks.flatMap(c=>(c.status==='warn'||c.status==='error')?(c.remediation||[]):[]); if(fixes.length){html+='<h3>What to run next</h3>'+commandRows('Fix', fixes)} else {html+='<p class="ok">No local update remediation commands are needed right now.</p>'} html+='<h3>Checks</h3>'+checks.map(renderCheckCard).join(''); if((r.recommendations||[]).length){html+='<h3>Recommendations</h3><ul class="check-list">'+r.recommendations.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'} if((r.unsupported_checks||[]).length){html+='<h3>Unsupported or inconclusive</h3><ul class="check-list">'+r.unsupported_checks.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'} const kev=r.vulnerabilities?.recent_kev||[], nvd=r.vulnerabilities?.recent_critical||[]; html+='<h3>Security feeds</h3><p class="'+(kev.length||nvd.length?'warn':'ok')+'">'+kev.length+' recent CISA KEV · '+nvd.length+' recent critical NVD CVEs.</p>'; if(kev.length){html+=kev.slice(0,5).map(v=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">KEV</span> '+esc(v.cve)+' · '+esc(v.vendor_project)+' '+esc(v.product)+'</span><span class="muted small">'+esc(v.date_added)+'</span></div><div class="detail">'+esc(v.vulnerability_name)+'</div><div class="detail">Required action: '+esc(v.required_action||'review vendor guidance and patch or mitigate')+'</div></div>').join('')} if(nvd.length){html+=nvd.slice(0,5).map(v=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">NVD</span> '+esc(v.id)+' · score '+esc(v.score||'?')+'</span><span class="muted small">'+esc(formatISO(v.published))+'</span></div><div class="detail">'+esc(v.summary||'Review vendor guidance and patch affected software if present.')+'</div></div>').join('')} if((r.vulnerabilities?.errors||[]).length){html+='<h3>Feed errors</h3><ul class="check-list">'+r.vulnerabilities.errors.map(x=>'<li class="bad">'+esc(x)+'</li>').join('')+'</ul>'} return html}
 async function aiStatus(){$('aiOut').textContent='Checking AI backend...'; try{const r=await api('/api/ai/status'); setDetails('AI status',r); const s=r.status||{}, ready=s.server_ready||s.cli_ready||s.remote_ready; $('aiOut').innerHTML='<p class="'+(ready?'ok':'warn')+'">'+(ready?'● AI backend is ready.':'○ AI backend is not ready yet.')+'</p><p class="muted">'+esc(s.message||'No status message.')+'</p><p class="muted small">Backend: '+esc(s.config?.backend||'unknown')+' · Privacy: '+esc(s.config?.privacy_mode||'metadata')+' · Notes: '+esc((r.notes||[]).length)+'</p>'}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function aiSetup(){$('aiOut').textContent='Building setup guide...'; try{const r=await api('/api/ai/setup'); setDetails('AI setup plan',r); $('aiOut').innerHTML='<p><b>What this does:</b> helps you install llama.cpp, choose a small Gemma GGUF model, start a local model server, and point Aegis at it.</p><p class="muted">Recommended: '+esc(r.recommended_model||'Gemma GGUF')+'</p><h3>Steps</h3><ol class="list">'+(r.commands||[]).map(c=>'<li>'+esc(c)+'</li>').join('')+'</ol>'}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function remember(){const text=$('note').value.trim(); if(!text){$('aiOut').innerHTML='<span class="warn">Write a note first.</span>'; return} try{const r=await api('/api/ai/remember',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})}); $('note').value=''; $('aiOut').innerHTML='<span class="ok">Saved local context note. The AI will include recent notes when explaining findings.</span>'; setDetails('AI context notes',r)}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}

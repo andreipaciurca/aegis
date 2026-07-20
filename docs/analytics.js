@@ -10,6 +10,16 @@
   var GA_MEASUREMENT_ID = "G-XXXXXXXXXX";
   var CONSENT_KEY = "aegis_analytics_consent";
 
+  if (location.protocol === "file:") return;
+
+  function storageGet(key) {
+    try { return localStorage.getItem(key); } catch (e) { return "denied"; }
+  }
+
+  function storageSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) {}
+  }
+
   function loadGA() {
     if (GA_MEASUREMENT_ID.indexOf("XXXXXXXXXX") !== -1) return;
     var s = document.createElement("script");
@@ -62,11 +72,11 @@
       "font:inherit;font-weight:600;";
 
     decline.addEventListener("click", function () {
-      localStorage.setItem(CONSENT_KEY, "denied");
+      storageSet(CONSENT_KEY, "denied");
       bar.remove();
     });
     accept.addEventListener("click", function () {
-      localStorage.setItem(CONSENT_KEY, "granted");
+      storageSet(CONSENT_KEY, "granted");
       bar.remove();
       loadGA();
     });
@@ -79,7 +89,7 @@
   }
 
   function init() {
-    var consent = localStorage.getItem(CONSENT_KEY);
+    var consent = storageGet(CONSENT_KEY);
     if (consent === "granted") {
       loadGA();
     } else if (consent !== "denied") {

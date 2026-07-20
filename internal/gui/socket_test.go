@@ -1,8 +1,12 @@
 package gui
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -106,3 +110,49 @@ func TestListenUnixSocketDoesNotClobberRegularFile(t *testing.T) {
 		t.Errorf("regular file contents changed: %q", b)
 	}
 }
+
+func TestSameOriginAllowsHTTPSLocalGUI(t *testing.T) {
+	r := &http.Request{
+		Host:   "127.0.0.1:4443",
+		URL:    &url.URL{Scheme: "https", Host: "127.0.0.1:4443"},
+		Header: http.Header{"Origin": {"https://127.0.0.1:4443"}},
+		TLS:    &tlsConnectionState,
+	}
+	if !sameOriginOrTrusted(r) {
+		t.Fatal("expected matching HTTPS origin to be allowed")
+	}
+}
+
+func TestSameOriginRejectsMixedHTTPSOrigin(t *testing.T) {
+	r := &http.Request{
+		Host:   "127.0.0.1:4443",
+		URL:    &url.URL{Scheme: "https", Host: "127.0.0.1:4443"},
+		Header: http.Header{"Origin": {"http://127.0.0.1:4443"}},
+		TLS:    &tlsConnectionState,
+	}
+	if sameOriginOrTrusted(r) {
+		t.Fatal("expected mixed http origin against HTTPS request to be rejected")
+	}
+}
+
+func TestLoadOrCreateLocalCertGeneratesLocalhostCertificate(t *testing.T) {
+	cert, err := loadOrCreateLocalCert("", "")
+	if err != nil {
+		t.Fatalf("loadOrCreateLocalCert: %v", err)
+	}
+	if len(cert.Certificate) == 0 {
+		t.Fatal("generated certificate has no DER certificate")
+	}
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse generated certificate: %v", err)
+	}
+	if len(parsed.DNSNames) == 0 || parsed.DNSNames[0] != "localhost" {
+		t.Fatalf("generated certificate DNS names = %v, want localhost first", parsed.DNSNames)
+	}
+	if len(parsed.IPAddresses) < 1 || !parsed.IPAddresses[0].Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("generated certificate IPs = %v, want 127.0.0.1 included", parsed.IPAddresses)
+	}
+}
+
+var tlsConnectionState = tls.ConnectionState{}
