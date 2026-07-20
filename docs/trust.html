@@ -96,6 +96,7 @@
   .repo-link { display: inline-flex; align-items: center; gap: 7px; }
   .repo-link svg { width: 15px; height: 15px; }
 </style>
+<script src="analytics.js" defer></script>
 </head>
 <body>
 <nav>
@@ -147,6 +148,10 @@ shasum -a 256 -c SHA256SUMS</code></pre>
     <li>No login item</li>
     <li>No bundled local LLM or model weights</li>
   </ul>
+  <p>The <code>aegis</code> binary itself never phones home. This website
+  (the page you're reading, not the tool) asks before loading Google
+  Analytics — decline it and nothing loads. That's separate from and
+  unrelated to anything the binary does.</p>
 
   <h2>Actions that need your say-so</h2>
   <p>Every capability that touches something outside the scan itself is
