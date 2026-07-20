@@ -227,7 +227,7 @@
     .node:not(.head):hover { transform: translateY(-1px); border-color: var(--accent); color: var(--text); }
     .step:hover { transform: translateX(3px); border-left-color: var(--blue); }
   }
-  .pane-title { position: absolute; top: -9px; left: 14px; background: var(--panel); padding: 0 8px; font-size: 12px; color: var(--accent); }
+  .pane-title { display: block; font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
   .pane-title svg { width: 13px; height: 13px; vertical-align: -2px; margin-right: 4px; }
   .pane p { color: var(--subtle); font-size: 13.5px; margin-top: 2px; }
   .pane p b { color: var(--text); font-weight: 400; }
@@ -300,10 +300,11 @@
 
   /* quickstart */
   .steps { display: grid; gap: 14px; margin-top: 30px; max-width: 760px; }
-  .stepline { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 14px 18px; overflow-x: auto; }
+  .stepline { position: relative; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 14px 46px 18px 18px; overflow-x: auto; }
   .stepline .c { color: var(--subtle); font-size: 12px; display: block; margin-bottom: 4px; }
   .stepline code { color: var(--text); font-family: var(--mono); font-size: 13.5px; white-space: pre; }
   .stepline code .sh { color: var(--green); }
+  .stepline .copy-btn { position: absolute; top: 10px; right: 10px; font-size: 11px; padding: 4px 9px; }
 
   /* keys table */
   table { border-collapse: collapse; margin-top: 26px; font-size: 13.5px; width: 100%; max-width: 680px; }
@@ -482,7 +483,7 @@
     <h2>Seven panes, no magic.</h2>
     <div class="panes">
       <div class="pane">
-        <span class="pane-title">┤ scanner ├</span>
+        <span class="pane-title">scanner</span>
         <p><b>SHA-256 hashing</b> against a local signature database, an
            updatable <b>YARA-lite rule engine</b> (reverse shells, Mimikatz,
            PowerShell cradles, webshells, coinminers), and <b>entropy
@@ -492,7 +493,7 @@
         <span class="demo bad">✗ CRITICAL  loader.ps1 — PowerShell download-and-execute cradle</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ ransom shield ├</span>
+        <span class="pane-title">ransom shield</span>
         <p>Deploys harmless <b>canary files</b> and watches them for tampering —
            if ransomware encrypts one, aegis knows in seconds. A sweep also
            catches ransom notes, known extensions (<b>.lockbit</b>, <b>.wncry</b>),
@@ -501,7 +502,7 @@
         <span class="demo bad">✗ CRITICAL  canary encrypted (entropy 8.0) — active ransomware likely</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ persistence audit ├</span>
+        <span class="pane-title">persistence audit</span>
         <p>Enumerates the autostart mechanisms malware abuses to survive reboot
            — <b>LaunchAgents</b>, systemd, cron, autostart, <b>Run keys</b> — and
            flags suspicious entries (temp-dir payloads, encoded commands),
@@ -509,7 +510,7 @@
         <span class="demo warn">⚠ LaunchAgent com.x.helper — runs from a temporary directory</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ network + remediation ├</span>
+        <span class="pane-title">network + remediation</span>
         <p>A live table of every connection and listener, suspicious entries
            first. Then <b>act</b>: select a row and press <b>k</b> to kill the
            process (with a confirm prompt) or <b>b</b> to block the port at the
@@ -517,7 +518,7 @@
         <span class="demo warn">⚠ listening on all interfaces (:5000) → press k / b</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ firewall ├</span>
+        <span class="pane-title">firewall</span>
         <p>Reads and toggles the <b>native OS firewall</b> instead of reinventing
            one: macOS Application Firewall + pf + stealth mode, Linux
            ufw / nftables / iptables, Windows Defender Firewall. Without
@@ -525,7 +526,7 @@
         <span class="demo">● ENABLED · stealth on · 42 rules</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ updates ├</span>
+        <span class="pane-title">updates</span>
         <p>Startup refreshes MalwareBazaar and URLhaus payload hashes, checks
            whether a newer aegis release exists, and checks the latest llama.cpp
            release. Press <b>u</b> in the TUI/GUI or run <code>aegis update</code>
@@ -534,7 +535,7 @@
         <span class="demo">✓ signatures +633 (634 total) · Aegis current · llama.cpp b10068</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ osint ├</span>
+        <span class="pane-title">osint</span>
         <p>When you explicitly ask, aegis can enrich a hash with
            <b>VirusTotal</b> API v3 file reputation. Normal scans never upload
            files or call external reputation services; <b>intel</b> sends only
@@ -542,7 +543,7 @@
         <span class="demo">aegis intel &lt;sha256&gt; --json</span>
       </div>
       <div class="pane">
-        <span class="pane-title">┤ clamav bridge ├</span>
+        <span class="pane-title">clamav bridge</span>
         <p>For a free self-hosted AV engine, run <b>clamd</b> locally and let
            aegis stream files with ClamAV's <b>INSTREAM</b> protocol. No vendor
            upload, no bundled ClamAV code or database, just explicit local scanning.</p>
@@ -769,7 +770,8 @@ aegis ai chat</code>
     </a>
     <span>Go + Bubble Tea · Catppuccin</span>
     <a href="./trust.html">trust & verification</a>
-    <a href="https://bazaar.abuse.ch/">signature feed: abuse.ch</a>
+    <a href="https://github.com/andreipaciurca/aegis/releases">releases</a>
+    <a href="https://abuse.ch/">signature feeds: MalwareBazaar &amp; URLhaus</a>
   </div>
 </footer>
 
@@ -815,6 +817,27 @@ aegis ai chat</code>
       navigator.clipboard.writeText(text).then(function () {
         copy.textContent = "copied";
         setTimeout(function () { copy.textContent = "copy"; }, 1200);
+      });
+    });
+  })();
+
+  // Quickstart step copy buttons.
+  (function () {
+    if (!navigator.clipboard) { return; }
+    document.querySelectorAll(".stepline").forEach(function (line) {
+      var code = line.querySelector("code");
+      if (!code) { return; }
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "copy-btn";
+      btn.textContent = "copy";
+      btn.setAttribute("aria-label", "Copy command");
+      line.appendChild(btn);
+      btn.addEventListener("click", function () {
+        navigator.clipboard.writeText(code.textContent).then(function () {
+          btn.textContent = "copied";
+          setTimeout(function () { btn.textContent = "copy"; }, 1200);
+        });
       });
     });
   })();
