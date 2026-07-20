@@ -56,7 +56,8 @@ type netMsg struct {
 	err   error
 }
 type updateMsg struct {
-	report maintenance.Report
+	report  maintenance.Report
+	install *maintenance.InstallResult
 }
 type quarMsg struct {
 	rec scanner.QuarantineRecord
@@ -315,7 +316,13 @@ func (m *Model) runUpdate() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		return updateMsg{report: maintenance.Startup(ctx, db, Version)}
+		report := maintenance.Startup(ctx, db, Version)
+		var install *maintenance.InstallResult
+		if report.Aegis.Update {
+			r := maintenance.InstallUpdate(ctx, report.Aegis.Latest)
+			install = &r
+		}
+		return updateMsg{report: report, install: install}
 	}
 }
 
@@ -634,6 +641,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateMsg:
 		m.updating = false
 		text, isErr := maintenance.Summary(msg.report)
+		if msg.install != nil {
+			switch {
+			case msg.install.Installed:
+				text += " · installed " + msg.install.Version + ", restart aegis to use it"
+			case msg.install.NeedsSudo:
+				text += " · install failed (needs elevated permissions): " + msg.install.Error
+				isErr = true
+			default:
+				text += " · install failed: " + msg.install.Error
+				isErr = true
+			}
+		}
 		return m, m.flash(text, isErr)
 
 	case quarMsg:
