@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -122,17 +123,38 @@ func extractTarGz(path, dest string) error {
 }
 
 func safeJoin(base, name string) (string, error) {
-	clean := filepath.Clean(name)
-	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
+	if archiveEntryIsAbsolute(name) {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
-	target := filepath.Join(base, clean)
+	// Archive entry names are POSIX-style (forward slashes) regardless of
+	// the extracting host's OS, so ".." segments are resolved with the
+	// path package rather than filepath — filepath.Clean/IsAbs follow
+	// host conventions (e.g. a leading "/" isn't "absolute" on Windows),
+	// which would let a POSIX-style traversal slip through on Windows.
+	posix := path.Clean(strings.ReplaceAll(name, "\\", "/"))
+	if posix == ".." || strings.HasPrefix(posix, "../") {
+		return "", fmt.Errorf("unsafe archive path %q", name)
+	}
+	target := filepath.Join(base, filepath.FromSlash(posix))
 	rel, err := filepath.Rel(base, target)
 	if err != nil {
 		return "", err
 	}
-	if strings.HasPrefix(rel, "..") {
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("unsafe archive path %q", name)
 	}
 	return target, nil
+}
+
+// archiveEntryIsAbsolute reports whether name looks like an absolute path
+// under either POSIX or Windows conventions, independent of the host OS
+// actually doing the extracting.
+func archiveEntryIsAbsolute(name string) bool {
+	if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "\\") {
+		return true
+	}
+	if len(name) >= 2 && name[1] == ':' { // drive letter, e.g. "C:\..." or "C:/..."
+		return true
+	}
+	return false
 }

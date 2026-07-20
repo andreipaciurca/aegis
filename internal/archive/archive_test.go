@@ -135,6 +135,21 @@ func TestExtractTarGzRejectsAbsolutePath(t *testing.T) {
 	}
 }
 
+func TestExtractZipRejectsWindowsAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	zipPath := filepath.Join(dir, "evil.zip")
+	writeZip(t, zipPath, map[string]string{
+		`C:\Windows\System32\evil.dll`: "pwned",
+	})
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Extract(zipPath, dest); err == nil {
+		t.Fatal("expected an error for a Windows drive-letter absolute entry, got nil")
+	}
+}
+
 func TestExtractUnsupportedExtension(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.rar")
