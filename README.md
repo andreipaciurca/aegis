@@ -183,8 +183,8 @@ the footprint stays tiny and nothing is left running when you quit.
 ```mermaid
 flowchart TD
     CLI["aegis CLI<br/>scan · shield · audit · update · status"]
-    TUI["Bubble Tea TUI<br/>7 tabs"]
-    GUI["Local browser GUI<br/>127.0.0.1"]
+    TUI["Bubble Tea TUI<br/>responsive tabs"]
+    GUI["Local browser GUI<br/>127.0.0.1 views"]
 
     CLI --> CORE
     TUI --> CORE
@@ -417,8 +417,8 @@ You can also publish an exact tag from the terminal:
 ```sh
 git checkout main
 git pull
-git tag -a v1.6.0 -m "aegis v1.6.0"
-git push origin v1.6.0
+git tag -a vX.Y.Z -m "aegis vX.Y.Z"
+git push origin vX.Y.Z
 ```
 
 The release will contain `.tar.gz` archives for macOS/Linux, a `.zip` for

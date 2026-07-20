@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Optional exact release tag, for example v1.6.0"
+        description: "Optional exact release tag, for example vX.Y.Z"
         required: false
       bump:
         description: "Version bump to compute when tag is empty"
@@ -75,6 +75,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Check GUI JavaScript runtime
+        run: node --version
 
       - name: Test
         run: make test

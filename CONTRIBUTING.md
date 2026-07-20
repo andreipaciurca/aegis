@@ -36,6 +36,7 @@ are required for development.
 ```sh
 go vet ./...
 go test -race ./...
+node --version       # required in CI so GUI JavaScript tests do not skip
 gofmt -l .          # must print nothing
 go run honnef.co/go/tools/cmd/staticcheck@latest ./...
 ```
@@ -55,6 +56,11 @@ heuristic), add a table-driven test in the same package (`package x`, not
 `package x_test` — this repo tests unexported functions directly; see any
 existing `*_test.go` for the pattern) rather than only testing through the
 CLI/TUI.
+
+If you change the browser GUI (`internal/gui`), the embedded HTML/JavaScript
+must keep passing the GUI smoke tests in `internal/gui/html_test.go`. Those
+tests parse the script and run it against a tiny DOM/API harness so a syntax or
+startup-rendering bug cannot ship as a blank page again.
 
 ## Where things live
 

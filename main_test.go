@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,4 +69,80 @@ func TestParseGUIFlagsHTTPS(t *testing.T) {
 	if flags.cert != "localhost.pem" || flags.key != "localhost-key.pem" || flags.socket != "aegis.sock" {
 		t.Fatalf("unexpected parsed flags: %+v", flags)
 	}
+}
+
+func TestUsageMentionsEveryPrimaryCommand(t *testing.T) {
+	out := captureStdout(t, usage)
+	for _, want := range []string{
+		"aegis app",
+		"scan PATH",
+		"status",
+		"update",
+		"gui",
+		"shield",
+		"network [--all]",
+		"firewall [status]",
+		"audit",
+		"checkup",
+		"ai",
+		"intel HASH",
+		"clamav PATH",
+		"analyze PATH",
+		"history",
+		"restore ID",
+		"version",
+		"aegis help scan",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("top-level usage missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestCommandUsageTopicsAreHumanReadable(t *testing.T) {
+	topics := map[string][]string{
+		"scan":     {"aegis scan PATH", "Exit codes"},
+		"shield":   {"aegis shield", "ransomware"},
+		"audit":    {"aegis audit", "persistence"},
+		"firewall": {"aegis firewall", "macOS", "Linux", "Windows"},
+		"network":  {"aegis network", "why it was flagged", "Command Prompt"},
+		"status":   {"aegis status", "posture score"},
+		"checkup":  {"aegis checkup", "CISA KEV", "NVD"},
+		"ai":       {"aegis ai status", "advisory"},
+		"intel":    {"aegis intel HASH", "VirusTotal", "normal scans never call VirusTotal"},
+		"clamav":   {"aegis clamav PATH", "clamd"},
+		"gui":      {"aegis gui", "127.0.0.1", "--https"},
+		"app":      {"aegis app", "TUI and local browser GUI"},
+		"analyze":  {"aegis analyze", "disk"},
+		"history":  {"aegis history", "quarantine"},
+		"restore":  {"aegis restore", "Undoes a quarantine"},
+		"update":   {"aegis update", "SHA256SUMS", "Restart aegis"},
+		"version":  {"aegis version", "installed aegis version"},
+	}
+	for topic, wants := range topics {
+		out := captureStdout(t, func() { commandUsage(topic) })
+		for _, want := range wants {
+			if !strings.Contains(out, want) {
+				t.Fatalf("help topic %q missing %q:\n%s", topic, want, out)
+			}
+		}
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(out)
 }
