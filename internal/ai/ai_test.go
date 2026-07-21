@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -250,17 +251,34 @@ func TestManagedServerArgsUseCompactProfile(t *testing.T) {
 	for _, want := range []string{
 		"-hf " + DefaultModelRef,
 		"--no-mmproj",
-		"--ctx-size 2048",
-		"--batch-size 256",
-		"--ubatch-size 128",
+		"--ctx-size 1024",
+		"--batch-size 128",
+		"--ubatch-size 64",
 		"--parallel 1",
 		"--n-gpu-layers 0",
 		"--no-kv-offload",
-		"--fit-target 2048",
+		"--fit-target 1024",
 	} {
 		if !strings.Contains(args, want) {
 			t.Errorf("managed server arguments missing %q: %s", want, args)
 		}
+	}
+}
+
+func TestRuntimeProfilesAreBoundedAndExplicit(t *testing.T) {
+	compact := DetectRuntimePlan(ProfileCompact)
+	if compact.ModelRef != DefaultModelRef || compact.ContextTokens != 1024 || compact.BatchSize != 128 {
+		t.Fatalf("unexpected compact runtime plan: %+v", compact)
+	}
+	if compact.Threads < 2 || compact.Threads > 3 || compact.GPUOffload {
+		t.Fatalf("compact plan should preserve interactive headroom: %+v", compact)
+	}
+	balanced := DetectRuntimePlan(ProfileBalanced)
+	if balanced.ModelRef != BalancedModelRef || balanced.ContextTokens != 2048 || balanced.BatchSize != 256 {
+		t.Fatalf("unexpected balanced runtime plan: %+v", balanced)
+	}
+	if balanced.Threads < 2 || balanced.Threads > 4 {
+		t.Fatalf("balanced threads should remain bounded: %+v", balanced)
 	}
 }
 
@@ -291,5 +309,53 @@ func TestParseListenerPIDRejectsUnrelatedOutput(t *testing.T) {
 	}
 	if _, err := parseListenerPID("  TCP    0.0.0.0:8080         0.0.0.0:0              LISTENING       2468\r\n", "windows"); err == nil {
 		t.Fatal("expected public Windows listener output to be rejected")
+	}
+}
+
+func TestGenerateWithStatsIncludesUsageAndCompactHistory(t *testing.T) {
+	var payload struct {
+		MaxTokens int `json:"max_tokens"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`))
+	}))
+	defer server.Close()
+
+	history := make([]ChatMessage, 8)
+	for i := range history {
+		history[i] = ChatMessage{Role: "user", Content: "prior turn"}
+	}
+	history[0] = ChatMessage{Role: "system", Content: "must be discarded"}
+	result, err := GenerateWithStats(context.Background(), Config{Backend: BackendServer, Endpoint: server.URL}, Request{System: "system", Prompt: "hi", History: history})
+	if err != nil {
+		t.Fatalf("GenerateWithStats: %v", err)
+	}
+	if result.Answer != "hello" || result.TotalTokens != 15 || result.PromptTokens != 12 || result.OutputTokens != 3 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if payload.MaxTokens != 192 {
+		t.Fatalf("max_tokens = %d, want 192", payload.MaxTokens)
+	}
+	if len(payload.Messages) != 8 { // system + six retained turns + current prompt
+		t.Fatalf("messages = %d, want 8", len(payload.Messages))
+	}
+	if payload.Messages[0].Role != "system" || payload.Messages[len(payload.Messages)-1].Content != "hi" {
+		t.Fatalf("unexpected message framing: %+v", payload.Messages)
+	}
+}
+
+func TestSecuritySystemPromptRejectsInventedFindings(t *testing.T) {
+	prompt := SecuritySystemPrompt()
+	for _, want := range []string{"Never invent findings", "greeting or general question", "supplied context"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("system prompt missing %q", want)
+		}
 	}
 }

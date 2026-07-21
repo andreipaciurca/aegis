@@ -29,9 +29,12 @@ const (
 	DefaultURL              = "http://127.0.0.1:8080/v1/chat/completions"
 	DefaultRemoteURL        = "https://api.openai.com/v1/chat/completions"
 	DefaultRemoteKeyEnv     = "OPENAI_API_KEY"
+	ProfileCompact          = "compact"
+	ProfileBalanced         = "balanced"
 	// DefaultModelRef deliberately favors responsive local diagnostics on
 	// 8 GB laptops. Larger models remain documented as opt-in alternatives.
-	DefaultModelRef = "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M"
+	DefaultModelRef  = "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M"
+	BalancedModelRef = "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M"
 )
 
 type Config struct {
@@ -43,6 +46,7 @@ type Config struct {
 	APIKeyEnv       string `json:"api_key_env,omitempty"`
 	MaxExcerptBytes int    `json:"max_excerpt_bytes"`
 	PrivacyMode     string `json:"privacy_mode"`
+	Profile         string `json:"profile,omitempty"`
 }
 
 type Status struct {
@@ -68,6 +72,24 @@ type SetupPlan struct {
 	Configured      bool                 `json:"configured"`
 	LlamaServer     string               `json:"llama_server,omitempty"`
 	Run             *ManagedServerResult `json:"run,omitempty"`
+	Runtime         RuntimePlan          `json:"runtime"`
+}
+
+// RuntimePlan makes local model resource choices inspectable before a model is
+// started. It does not claim exact speed: that depends on the model, hardware,
+// and installed llama.cpp build.
+type RuntimePlan struct {
+	Profile           string `json:"profile"`
+	ModelRef          string `json:"model_ref"`
+	MemoryGiB         int    `json:"memory_gib,omitempty"`
+	CPUCount          int    `json:"cpu_count"`
+	Threads           int    `json:"threads"`
+	ContextTokens     int    `json:"context_tokens"`
+	BatchSize         int    `json:"batch_size"`
+	GPUOffload        bool   `json:"gpu_offload"`
+	EstimatedModelGiB int    `json:"estimated_model_gib"`
+	Recommended       bool   `json:"recommended"`
+	Reason            string `json:"reason"`
 }
 
 type ModelSource struct {
@@ -92,8 +114,27 @@ type SetupCommand struct {
 }
 
 type Request struct {
-	System string `json:"system"`
-	Prompt string `json:"prompt"`
+	System  string        `json:"system"`
+	Prompt  string        `json:"prompt"`
+	History []ChatMessage `json:"history,omitempty"`
+}
+
+// ChatMessage is a compact, user-visible conversation turn. Aegis only keeps
+// a short recent history per GUI session; it does not persist chat transcripts.
+type ChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// Response includes a model answer plus optional provider-reported usage.
+// Timing is measured by Aegis even when a backend does not expose tokens.
+type Response struct {
+	Answer       string  `json:"answer"`
+	PromptTokens int     `json:"prompt_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
+	TotalTokens  int     `json:"total_tokens,omitempty"`
+	DurationMS   int64   `json:"duration_ms"`
+	TokensPerSec float64 `json:"tokens_per_second,omitempty"`
 }
 
 type Note struct {
@@ -108,6 +149,7 @@ func DefaultConfig() Config {
 		Command:         "llama-cli",
 		MaxExcerptBytes: 2048,
 		PrivacyMode:     "metadata",
+		Profile:         ProfileCompact,
 	}
 }
 
@@ -195,24 +237,43 @@ func Check(cfg Config) Status {
 }
 
 func Generate(ctx context.Context, cfg Config, req Request) (string, error) {
+	result, err := GenerateWithStats(ctx, cfg, req)
+	return result.Answer, err
+}
+
+// GenerateWithStats runs the configured backend and preserves optional token
+// usage supplied by OpenAI-compatible servers such as llama.cpp.
+func GenerateWithStats(ctx context.Context, cfg Config, req Request) (Response, error) {
 	normalize(&cfg)
+	started := time.Now()
+	var result Response
+	var err error
 	switch cfg.Backend {
 	case BackendServer:
-		return generateServer(ctx, cfg, req)
+		result, err = generateServer(ctx, cfg, req)
 	case BackendCLI:
-		return generateCLI(ctx, cfg, req)
+		var answer string
+		answer, err = generateCLI(ctx, cfg, req)
+		result.Answer = answer
 	case BackendOpenAICompatible:
-		return generateServer(ctx, cfg, req)
+		result, err = generateServer(ctx, cfg, req)
 	default:
-		return "", fmt.Errorf("unsupported AI backend %q", cfg.Backend)
+		err = fmt.Errorf("unsupported AI backend %q", cfg.Backend)
 	}
+	result.DurationMS = time.Since(started).Milliseconds()
+	if result.DurationMS > 0 && result.OutputTokens > 0 {
+		result.TokensPerSec = float64(result.OutputTokens) * 1000 / float64(result.DurationMS)
+	}
+	return result, err
 }
 
 func SecuritySystemPrompt() string {
 	return `You are Aegis Local Analyst, a defensive security assistant running fully locally.
-Your job is to explain Aegis findings, estimate false-positive likelihood, and suggest safe next steps.
+Your job is to explain supplied Aegis findings, estimate false-positive likelihood, and suggest safe next steps.
 Rules:
-- Treat signatures, ransomware canary tampering, and CISA KEV matches as high confidence.
+- Never invent findings, files, processes, CVEs, reports, timestamps, or prior investigations. Only discuss evidence included in the user request or Aegis context.
+- For a greeting or general question with no findings, answer naturally and briefly. Do not start an incident report or claim to have reviewed a system.
+- Treat signatures, ransomware canary tampering, and CISA KEV matches as high confidence only when they appear in supplied context.
 - Do not claim a finding is clean; use "likely false positive" only with reasons.
 - Do not suggest deletion as the first response; prefer quarantine, isolation, updating, or manual review.
 - Do not ask to upload private files.`
@@ -282,6 +343,12 @@ func PromptWithNotes(system string) string {
 }
 
 func PlanSetup() (SetupPlan, error) {
+	return PlanSetupForProfile(ProfileCompact)
+}
+
+// PlanSetupForProfile returns the setup documentation and the actual bounded
+// resource plan for a user-selected local profile.
+func PlanSetupForProfile(profile string) (SetupPlan, error) {
 	dir, err := signatures.Dir()
 	if err != nil {
 		return SetupPlan{}, err
@@ -289,6 +356,7 @@ func PlanSetup() (SetupPlan, error) {
 	modelDir := filepath.Join(dir, "models")
 	installDir := filepath.Join(dir, "llama.cpp")
 	homeModel := filepath.Join(modelDir, "gemma.gguf")
+	runtimePlan := DetectRuntimePlan(profile)
 	modelSources := []ModelSource{
 		{
 			Name:     "Gemma 3 1B instruct GGUF (compact default)",
@@ -388,17 +456,19 @@ func PlanSetup() (SetupPlan, error) {
 		InstallDir:      installDir,
 		ModelDir:        modelDir,
 		ModelFile:       homeModel,
-		Recommended:     "Gemma 3 1B instruction-tuned GGUF, Q4_K_M quantization (compact default for 8 GB laptops)",
+		Recommended:     runtimePlan.Reason,
 		LlamaReleaseURL: "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
 		ModelSources:    modelSources,
 		Sections:        sections,
 		Idempotent:      true,
+		Runtime:         runtimePlan,
 		Notes: []string{
 			"aegis queries llama.cpp releases at setup time so it can use the current build instead of a hardcoded tag",
 			"setup commands are idempotent for the current user on macOS, Linux/Unix and Windows; they avoid hardcoded usernames",
 			"model weights are cached by llama.cpp; repeat setup reuses the selected cached model instead of downloading it again",
 			"model weights are separate; download GGUF files only from sources you trust, review the model card/license and pin checksums for operational use",
 			"local llama.cpp remains the default privacy-preserving path; remote API backends are opt-in",
+			"the runtime plan limits threads, context and batch size to preserve interactive system use; a larger model is never selected automatically",
 		},
 		Commands: []string{
 			"mkdir -p " + shellQuote(modelDir),
@@ -458,46 +528,50 @@ func normalize(cfg *Config) {
 	if cfg.PrivacyMode == "" {
 		cfg.PrivacyMode = "metadata"
 	}
+	if cfg.Profile != ProfileBalanced {
+		cfg.Profile = ProfileCompact
+	}
 }
 
-func generateServer(ctx context.Context, cfg Config, req Request) (string, error) {
+func generateServer(ctx context.Context, cfg Config, req Request) (Response, error) {
 	model := cfg.Model
 	if model == "" {
 		model = "local"
 	}
+	messages := []map[string]string{{"role": "system", "content": req.System}}
+	for _, message := range compactHistory(req.History) {
+		messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
+	}
 	body := map[string]any{
 		"model":       model,
-		"max_tokens":  384,
+		"max_tokens":  192,
 		"temperature": 0.2,
-		"messages": []map[string]string{
-			{"role": "system", "content": req.System},
-			{"role": "user", "content": req.Prompt},
-		},
+		"messages":    append(messages, map[string]string{"role": "user", "content": req.Prompt}),
 	}
 	b, err := json.Marshal(body)
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Endpoint, bytes.NewReader(b))
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if cfg.Backend == BackendOpenAICompatible {
 		key := os.Getenv(cfg.APIKeyEnv)
 		if key == "" {
-			return "", fmt.Errorf("%s is not set", cfg.APIKeyEnv)
+			return Response{}, fmt.Errorf("%s is not set", cfg.APIKeyEnv)
 		}
 		httpReq.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return "", err
+		return Response{}, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return Response{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	var out struct {
 		Choices []struct {
@@ -505,14 +579,43 @@ func generateServer(ctx context.Context, cfg Config, req Request) (string, error
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
-		return "", err
+		return Response{}, err
 	}
 	if len(out.Choices) == 0 {
-		return "", errors.New("no model response")
+		return Response{}, errors.New("no model response")
 	}
-	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+	return Response{
+		Answer:       strings.TrimSpace(out.Choices[0].Message.Content),
+		PromptTokens: out.Usage.PromptTokens,
+		OutputTokens: out.Usage.CompletionTokens,
+		TotalTokens:  out.Usage.TotalTokens,
+	}, nil
+}
+
+func compactHistory(history []ChatMessage) []ChatMessage {
+	if len(history) > 6 {
+		history = history[len(history)-6:]
+	}
+	compact := make([]ChatMessage, 0, len(history))
+	for _, message := range history {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		content := strings.TrimSpace(message.Content)
+		if (role != "user" && role != "assistant") || content == "" {
+			continue
+		}
+		if len(content) > 1200 {
+			content = content[:1200]
+		}
+		compact = append(compact, ChatMessage{Role: role, Content: content})
+	}
+	return compact
 }
 
 func checkServerHealth(ctx context.Context, endpoint string) error {

@@ -71,7 +71,8 @@ security machinery your OS already provides.
   like to work.
 - **Optional analyst:** local llama.cpp or an explicit OpenAI-compatible
   backend can explain findings, but never overrides deterministic detections.
-  Run `aegis ai install` for the default local llama.cpp + Gemma setup.
+  Run `aegis ai plan` to inspect the bounded resource profile, then
+  `aegis ai install` for the default local llama.cpp + Gemma setup.
 
 ## Install
 
@@ -149,6 +150,7 @@ aegis network             # live network connections and listeners
 aegis firewall            # native firewall status and helper commands
 aegis checkup             # OS/dependency/security-feed check
 aegis update              # refresh signatures + check aegis/llama.cpp versions
+aegis ai plan             # inspect local model memory/CPU limits before setup
 aegis ai install          # one-command local llama.cpp + Gemma setup
 aegis history             # quarantine history
 aegis restore <id>        # decrypt quarantine to a review folder
