@@ -24,6 +24,7 @@ type SetupOptions struct {
 	DownloadLlama bool
 	Configure     bool
 	StartServer   bool
+	Profile       string
 	Wait          time.Duration
 	Progress      func(SetupProgress)
 }
@@ -89,7 +90,7 @@ func RunSetup(opts SetupOptions) (SetupPlan, error) {
 		opts.Configure = true
 	}
 	reportSetupProgress(opts, SetupProgress{Stage: "prepare", Message: "Preparing the local AI install directories"})
-	plan, err := PlanSetup()
+	plan, err := PlanSetupForProfile(opts.Profile)
 	if err != nil {
 		return plan, err
 	}
@@ -106,7 +107,7 @@ func RunSetup(opts SetupOptions) (SetupPlan, error) {
 			reportSetupProgress(opts, SetupProgress{Stage: "start", Message: "Starting the installed llama.cpp server"})
 			start, startErr := StartManagedServer(ManagedServerOptions{
 				InstallDir: plan.InstallDir,
-				ModelRef:   DefaultModelRef,
+				Profile:    plan.Runtime.Profile,
 				Wait:       opts.Wait,
 				Progress:   opts.Progress,
 			})
@@ -181,7 +182,7 @@ func RunSetup(opts SetupOptions) (SetupPlan, error) {
 		start, err := StartManagedServer(ManagedServerOptions{
 			InstallDir: plan.InstallDir,
 			ServerPath: plan.LlamaServer,
-			ModelRef:   DefaultModelRef,
+			Profile:    plan.Runtime.Profile,
 			Wait:       opts.Wait,
 			Progress:   opts.Progress,
 		})
@@ -199,6 +200,7 @@ func configureDefaultServer(plan *SetupPlan) error {
 	cfg := DefaultConfig()
 	cfg.Backend = BackendServer
 	cfg.Endpoint = DefaultURL
+	cfg.Profile = plan.Runtime.Profile
 	if err := Save(cfg); err != nil {
 		return err
 	}
@@ -211,6 +213,7 @@ type ManagedServerOptions struct {
 	InstallDir string
 	ServerPath string
 	ModelRef   string
+	Profile    string
 	Wait       time.Duration
 	Progress   func(SetupProgress)
 }
@@ -224,6 +227,9 @@ type ManagedServerResult struct {
 	LogFile        string `json:"log_file,omitempty"`
 	Endpoint       string `json:"endpoint"`
 	ModelRef       string `json:"model_ref"`
+	Profile        string `json:"profile"`
+	Threads        int    `json:"threads"`
+	ContextTokens  int    `json:"context_tokens"`
 	Message        string `json:"message"`
 }
 
@@ -369,8 +375,9 @@ func waitForServerExit(timeout time.Duration) bool {
 }
 
 func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) {
-	if opts.ModelRef == "" {
-		opts.ModelRef = DefaultModelRef
+	plan := DetectRuntimePlan(opts.Profile)
+	if opts.ModelRef != "" {
+		plan.ModelRef = opts.ModelRef
 	}
 	if opts.Wait <= 0 {
 		opts.Wait = 15 * time.Second
@@ -386,7 +393,10 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 			AlreadyRunning: true,
 			Ready:          true,
 			Endpoint:       DefaultURL,
-			ModelRef:       opts.ModelRef,
+			ModelRef:       plan.ModelRef,
+			Profile:        plan.Profile,
+			Threads:        plan.Threads,
+			ContextTokens:  plan.ContextTokens,
 			Message:        "llama-server is already ready",
 		}, nil
 	}
@@ -415,7 +425,7 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 	if err != nil {
 		return ManagedServerResult{}, err
 	}
-	cmd := exec.Command(server, managedServerArgs(opts.ModelRef)...)
+	cmd := exec.Command(server, managedServerArgsForPlan(plan)...)
 	cmd.Dir = filepath.Dir(server)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -424,16 +434,19 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 		return ManagedServerResult{}, err
 	}
 	if opts.Progress != nil {
-		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server started with the low-memory profile; waiting for Gemma to become ready"})
+		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server started with the " + plan.Profile + " profile; waiting for the model to become ready"})
 	}
 	res := ManagedServerResult{
-		Started:  true,
-		PID:      cmd.Process.Pid,
-		Command:  strings.Join(append([]string{server}, cmd.Args[1:]...), " "),
-		LogFile:  logPath,
-		Endpoint: DefaultURL,
-		ModelRef: opts.ModelRef,
-		Message:  "llama-server started with the compact low-memory profile; the first run may download the model",
+		Started:       true,
+		PID:           cmd.Process.Pid,
+		Command:       strings.Join(append([]string{server}, cmd.Args[1:]...), " "),
+		LogFile:       logPath,
+		Endpoint:      DefaultURL,
+		ModelRef:      plan.ModelRef,
+		Profile:       plan.Profile,
+		Threads:       plan.Threads,
+		ContextTokens: plan.ContextTokens,
+		Message:       "llama-server started with the " + plan.Profile + " profile; the first run may download the model",
 	}
 	exited := make(chan error, 1)
 	go func() {
@@ -459,12 +472,12 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 			return res, nil
 		}
 		if opts.Progress != nil && attempt%4 == 0 {
-			opts.Progress(SetupProgress{Stage: "waiting", Message: "Gemma is still loading; checking the local health endpoint again"})
+			opts.Progress(SetupProgress{Stage: "waiting", Message: "model is still loading; checking the local health endpoint again"})
 		}
 		time.Sleep(700 * time.Millisecond)
 	}
 	if opts.Progress != nil {
-		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server is running; Gemma is still loading with the low-memory profile"})
+		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server is running; model is still loading with the " + plan.Profile + " profile"})
 	}
 	select {
 	case exitErr := <-exited:
@@ -481,32 +494,33 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 // optional advisor responsive on small unified-memory machines. Aegis only
 // needs text analysis, so it deliberately avoids multimodal projector files.
 func managedServerArgs(modelRef string) []string {
-	threads := runtime.NumCPU() / 2
-	if threads < 2 {
-		threads = 2
-	}
-	if threads > 4 {
-		threads = 4
-	}
-	return []string{
-		"-hf", modelRef,
+	plan := DetectRuntimePlan(ProfileCompact)
+	plan.ModelRef = modelRef
+	return managedServerArgsForPlan(plan)
+}
+
+func managedServerArgsForPlan(plan RuntimePlan) []string {
+	args := []string{
+		"-hf", plan.ModelRef,
 		"--host", "127.0.0.1",
 		"--port", "8080",
 		"--cors-origins", "localhost",
 		"--no-cors-credentials",
 		"--no-mmproj",
-		"--ctx-size", "2048",
-		"--batch-size", "256",
-		"--ubatch-size", "128",
+		"--ctx-size", strconv.Itoa(plan.ContextTokens),
+		"--batch-size", strconv.Itoa(plan.BatchSize),
+		"--ubatch-size", strconv.Itoa(max(64, plan.BatchSize/2)),
 		"--parallel", "1",
-		"--threads", strconv.Itoa(threads),
-		"--threads-batch", strconv.Itoa(threads),
-		"--n-gpu-layers", "0",
-		"--no-kv-offload",
+		"--threads", strconv.Itoa(plan.Threads),
+		"--threads-batch", strconv.Itoa(plan.Threads),
 		"--fit", "on",
-		"--fit-target", "2048",
-		"--fit-ctx", "2048",
+		"--fit-target", strconv.Itoa(plan.ContextTokens),
+		"--fit-ctx", strconv.Itoa(plan.ContextTokens),
 	}
+	if plan.GPUOffload {
+		return append(args, "--n-gpu-layers", "99")
+	}
+	return append(args, "--n-gpu-layers", "0", "--no-kv-offload")
 }
 
 var versionedDylib = regexp.MustCompile(`^(lib.+?)\.([0-9]+)\.[0-9.]+\.dylib$`)

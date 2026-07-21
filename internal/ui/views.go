@@ -49,6 +49,15 @@ func (m Model) View() string {
 
 func (m Model) viewHeader() string {
 	logo := logoStyle.Render("⛨ AEGIS")
+	if m.width < 108 {
+		active := tabActiveStyle.Render(fmt.Sprintf("%d/%d %s", int(m.tab)+1, tabCount, shortTabName(tabNames[m.tab])))
+		hint := dimStyle.Render("tab browse · ? help")
+		row := lipgloss.JoinHorizontal(lipgloss.Center, logo, "  ", active)
+		if lipgloss.Width(row)+lipgloss.Width(hint)+2 <= m.width {
+			row += strings.Repeat(" ", m.width-lipgloss.Width(row)-lipgloss.Width(hint)) + hint
+		}
+		return row + "\n" + dimStyle.Render(strings.Repeat("─", max(m.width, 1)))
+	}
 	var tabs []string
 	for i, name := range tabNames {
 		label := tabLabel(i, name, m.width)
@@ -120,7 +129,7 @@ func (m Model) viewFooter() string {
 				keys = [][2]string{{"a", "ask"}, {"x", "explain threat"}, {"n", "remember"}, {"t", "test"}, {"r", "refresh"}}
 			}
 		default:
-			keys = [][2]string{{"1-7", "tabs"}, {"u", "update/check"}}
+			keys = [][2]string{{"tab", "browse"}, {"1-7", "jump to a panel"}, {"u", "update/check"}}
 		}
 	}
 	keys = append(keys, [2]string{"?", "help"})
@@ -242,25 +251,38 @@ func (m Model) viewDashboard() string {
 	}
 
 	cards := []dashboardCard{
-		{"FIREWALL", fwVal, fwNote},
-		{"MALWARE SCAN", scanVal, scanNote},
-		{"RANSOM SHIELD", shieldVal, shieldNote},
-		{"NETWORK", netVal, netNote},
-		{"PERSISTENCE", autoVal, autoNote},
-		{"SIGNATURES", textStyle.Render(fmt.Sprintf("%d hashes", m.db.Count())),
+		{"1  FIREWALL", fwVal, fwNote},
+		{"2  MALWARE SCAN", scanVal, scanNote},
+		{"3  RANSOM SHIELD", shieldVal, shieldNote},
+		{"4  NETWORK", netVal, netNote},
+		{"6  STARTUP AUDIT", autoVal, autoNote},
+		{"INTELLIGENCE", textStyle.Render(fmt.Sprintf("%d hashes", m.db.Count())),
 			fmt.Sprintf("%d rules · %s", m.eng.Count(), sigAge(m))},
-		{"LOCAL AI", aiVal, aiNote},
-		{"CHECKUP", textStyle.Render("OS + deps"), "aegis checkup"},
-		{"TRUST", textStyle.Render("signed releases"), "make checksums"},
+		{"7  LOCAL AI", aiVal, aiNote},
+		{"CHECKUP", textStyle.Render("OS + dependencies"), "run: aegis checkup"},
+		{"TRUST", textStyle.Render("release integrity"), "run: aegis verify"},
 	}
 
 	width := dashboardWidth(m.width)
+	if m.height > 0 && m.height < 30 {
+		// A short terminal should lead with the six security signals that can
+		// require a response, instead of burying them below secondary tooling.
+		cards = cards[:6]
+	}
 	grid := dashboardGrid(cards, width)
-	tip := "Seven layers, one binary: native firewall, hash/rule/entropy scanning, " +
-		"ransomware canaries, connection monitor, persistence audit, OS/dependency checkups, " +
-		"and a local llama.cpp analyst. Press ? for help, u to update signatures and check releases; each tab suggests a fix."
+	posture := m.dashboardPosture()
+	postureLine := ""
+	if width < 52 {
+		postureLine = cardTitleStyle.Render("POSTURE") + " " + posture.style.Render(posture.label) + " " + postureBar(posture.score, 6)
+	} else {
+		postureLine = cardTitleStyle.Render("PROTECTION POSTURE") + "  " + posture.style.Render(posture.label) +
+			"  " + postureBar(posture.score, min(max(width-38, 8), 22)) + "  " + textStyle.Render(fmt.Sprintf("%d/100", posture.score))
+	}
+	postureDetail := dimStyle.Width(width).Render(wrapText(posture.detail, width, ""))
+	tip := "Start with any amber or red panel. Select a numbered tab with 1-7, or press tab to browse. " +
+		"Aegis reports what it observed; it does not claim a virus probability."
 	tips := dimStyle.Width(width).Render(wrapText(tip, width, ""))
-	body := grid + "\n\n" + tips
+	body := postureLine + "\n" + postureDetail + "\n\n" + grid + "\n\n" + tips
 
 	return "\n" + lipgloss.PlaceHorizontal(m.width, lipgloss.Center, body)
 }
@@ -311,8 +333,8 @@ func dashboardWidth(termWidth int) int {
 		return 80
 	}
 	width := termWidth - 4
-	if width > 86 {
-		width = 86
+	if width > 118 {
+		width = 118
 	}
 	if width < 28 {
 		width = 28
@@ -323,9 +345,9 @@ func dashboardWidth(termWidth int) int {
 func dashboardGrid(cards []dashboardCard, width int) string {
 	cols := 1
 	switch {
-	case width >= 82:
+	case width >= 104:
 		cols = 3
-	case width >= 72:
+	case width >= 64:
 		cols = 2
 	}
 	gap := 2
@@ -360,6 +382,96 @@ func card(title, value, note string, width int) string {
 		inner += "\n" + dimStyle.Render(truncate(note, max(width-4, 12)))
 	}
 	return cardStyle.Width(width).MarginRight(0).Render(inner)
+}
+
+type posture struct {
+	score  int
+	label  string
+	detail string
+	style  lipgloss.Style
+}
+
+func (m Model) dashboardPosture() posture {
+	if !m.fwLoaded && !m.netLoaded && !m.auditLoaded {
+		return posture{score: 0, label: "CHECKING", detail: "Collecting local firewall, network, and startup signals...", style: blueStyle}
+	}
+
+	score := 100
+	issues := make([]string, 0, 4)
+	if !m.fwLoaded || !m.fw.Enabled {
+		score -= 30
+		issues = append(issues, "firewall needs attention")
+	}
+	threats := 0
+	if m.lastScan != nil {
+		threats = len(m.lastScan.Threats)
+	}
+	if threats > 0 {
+		score -= min(30, threats*10)
+		issues = append(issues, fmt.Sprintf("%d scan finding(s)", threats))
+	}
+	critical := 0
+	for _, e := range m.shieldEvents {
+		if e.Severity == "CRITICAL" {
+			critical++
+		}
+	}
+	if critical > 0 {
+		score -= 25
+		issues = append(issues, fmt.Sprintf("%d ransomware alert(s)", critical))
+	}
+	flagged := 0
+	for _, c := range m.conns {
+		if c.Suspect != "" {
+			flagged++
+		}
+	}
+	if flagged > 0 {
+		score -= min(15, flagged*5)
+		issues = append(issues, fmt.Sprintf("%d exposed network listener(s)", flagged))
+	}
+	suspicious := 0
+	for _, e := range m.auditEntries {
+		if e.Suspect != "" {
+			suspicious++
+		}
+	}
+	if suspicious > 0 {
+		score -= min(15, suspicious*5)
+		issues = append(issues, fmt.Sprintf("%d suspicious startup item(s)", suspicious))
+	}
+	if score < 0 {
+		score = 0
+	}
+	if len(issues) == 0 {
+		return posture{score: score, label: "CLEAR", detail: "No active Aegis detections. Firewall, network, and startup checks are currently clear.", style: okStyle}
+	}
+	if score < 55 || threats > 0 || critical > 0 || !m.fw.Enabled {
+		return posture{score: score, label: "ACTION NEEDED", detail: "Review: " + strings.Join(issues, " · ") + ".", style: badStyle}
+	}
+	return posture{score: score, label: "REVIEW", detail: "Review: " + strings.Join(issues, " · ") + ".", style: warnStyle}
+}
+
+func postureBar(score, width int) string {
+	if width < 4 {
+		width = 4
+	}
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	filled := score * width / 100
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	switch {
+	case score >= 85:
+		return okStyle.Render(bar)
+	case score >= 55:
+		return warnStyle.Render(bar)
+	default:
+		return badStyle.Render(bar)
+	}
 }
 
 // ---- scanner ----
@@ -714,12 +826,15 @@ func (m Model) viewAI() string {
 	rows := []string{
 		row("Status", state),
 		row("Backend", textStyle.Render(m.aiCfg.Backend)),
+		row("Profile", textStyle.Render(m.aiCfg.Profile)),
 		row("Endpoint", dimStyle.Render(truncate(m.aiCfg.Endpoint, max(m.width-24, 24)))),
 		row("Model", dimStyle.Render(truncate(aiModelLabel(m.aiCfg), max(m.width-24, 24)))),
 		row("Privacy", textStyle.Render(m.aiCfg.PrivacyMode)+dimStyle.Render(fmt.Sprintf("  %d byte excerpt cap", m.aiCfg.MaxExcerptBytes))),
 		row("Context", textStyle.Render(fmt.Sprintf("%d remembered note(s)", len(m.aiNotes)))),
 		row("Hint", dimStyle.Render(detail)),
 	}
+	plan := ai.DetectRuntimePlan(m.aiCfg.Profile)
+	rows = append(rows, row("Resources", dimStyle.Render(fmt.Sprintf("%d threads · %d ctx · batch %d", plan.Threads, plan.ContextTokens, plan.BatchSize))))
 	if !ready {
 		rows = append(rows, row("Reason", dimStyle.Render(truncate(m.aiOfflineReason(), max(m.width-24, 24)))))
 	}

@@ -816,6 +816,8 @@ func cliAI(args []string) int {
 		return cliAISetup(args[1:]...)
 	case "install", "bootstrap":
 		return cliAISetup(append(args[1:], "--run")...)
+	case "plan":
+		return cliAIPlan(args[1:]...)
 	case "config":
 		cfg = applyAIConfig(cfg, args[1:])
 		if err := ai.Save(cfg); err != nil {
@@ -865,7 +867,7 @@ func cliAI(args []string) int {
 		fmt.Println(result.Message)
 		return 0
 	default:
-		fmt.Fprintln(os.Stderr, "usage: aegis ai status | install | setup | stop | config [--backend ... --endpoint ... --model ... --remote-model ... --command ... --api-key-env ... --privacy metadata|excerpt] | test [prompt] | chat | remember <note> | context")
+		fmt.Fprintln(os.Stderr, "usage: aegis ai status | plan [--profile compact|balanced] | install [--profile compact|balanced] | setup | stop | config [--backend ... --endpoint ... --model ... --remote-model ... --command ... --api-key-env ... --privacy metadata|excerpt] | test [prompt] | chat | remember <note> | context")
 		return 2
 	}
 }
@@ -873,7 +875,8 @@ func cliAI(args []string) int {
 func cliAISetup(args ...string) int {
 	args, jsonMode := splitJSON(args)
 	opts := ai.SetupOptions{}
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		if a == "--download-llama" {
 			opts.DownloadLlama = true
 			continue
@@ -883,7 +886,16 @@ func cliAISetup(args ...string) int {
 			opts.Wait = 20 * time.Second
 			continue
 		}
-		fmt.Fprintln(os.Stderr, "usage: aegis ai setup [--download-llama|--run] [--json]")
+		if a == "--profile" && i+1 < len(args) {
+			i++
+			opts.Profile = args[i]
+			continue
+		}
+		if strings.HasPrefix(a, "--profile=") {
+			opts.Profile = strings.TrimPrefix(a, "--profile=")
+			continue
+		}
+		fmt.Fprintln(os.Stderr, "usage: aegis ai setup [--download-llama|--run] [--profile compact|balanced] [--json]")
 		return 2
 	}
 	plan, err := ai.RunSetup(opts)
@@ -899,6 +911,37 @@ func cliAISetup(args ...string) int {
 	return 0
 }
 
+func cliAIPlan(args ...string) int {
+	args, jsonMode := splitJSON(args)
+	profile := ai.ProfileCompact
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--profile" && i+1 < len(args):
+			i++
+			profile = args[i]
+		case strings.HasPrefix(args[i], "--profile="):
+			profile = strings.TrimPrefix(args[i], "--profile=")
+		default:
+			fmt.Fprintln(os.Stderr, "usage: aegis ai plan [--profile compact|balanced] [--json]")
+			return 2
+		}
+	}
+	plan := ai.DetectRuntimePlan(profile)
+	if jsonMode {
+		encodeJSON(plan)
+		return 0
+	}
+	colors := newCLIColors()
+	fmt.Println(colors.Blue("Aegis local AI resource plan"))
+	fmt.Printf("Profile:  %s\nModel:    %s\nMemory:   %d GiB detected\nCPU:      %d logical cores · %d Aegis threads\nContext:  %d tokens · batch %d\nGPU:      %s\nEstimate: about %d GiB model residency\n\n%s\n",
+		plan.Profile, plan.ModelRef, plan.MemoryGiB, plan.CPUCount, plan.Threads, plan.ContextTokens, plan.BatchSize,
+		map[bool]string{true: "enabled", false: "not used"}[plan.GPUOffload], plan.EstimatedModelGiB, plan.Reason)
+	if !plan.Recommended {
+		fmt.Println(colors.Yellow("This profile is not recommended on the detected memory. Use --profile compact to avoid swapping."))
+	}
+	return 0
+}
+
 func printAISetupPlan(plan ai.SetupPlan) {
 	colors := newCLIColors()
 	fmt.Println(colors.Blue("Aegis local AI setup"))
@@ -906,6 +949,7 @@ func printAISetupPlan(plan ai.SetupPlan) {
 	fmt.Printf("Install dir: %s\n", plan.InstallDir)
 	fmt.Printf("Model dir:   %s\n", plan.ModelDir)
 	fmt.Printf("Recommended: %s\n", plan.Recommended)
+	fmt.Printf("Runtime:     %s profile · %d threads · %d-token context · batch %d\n", plan.Runtime.Profile, plan.Runtime.Threads, plan.Runtime.ContextTokens, plan.Runtime.BatchSize)
 	fmt.Printf("llama.cpp:   %s\n", plan.LlamaReleaseURL)
 	fmt.Println()
 	if len(plan.ModelSources) > 0 {
@@ -1787,6 +1831,8 @@ func applyAIConfig(cfg ai.Config, args []string) ai.Config {
 			cfg.APIKeyEnv = next()
 		case "--privacy":
 			cfg.PrivacyMode = next()
+		case "--profile":
+			cfg.Profile = next()
 		case "--max-excerpt":
 			var n int
 			fmt.Sscanf(next(), "%d", &n)

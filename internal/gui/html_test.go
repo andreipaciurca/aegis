@@ -144,6 +144,15 @@ const sandbox = {
   if (!sync.includes('synced')) {
     throw new Error('sync status was not updated: ' + sync);
   }
+  const tick = String.fromCharCode(96);
+  const formatted = sandbox.renderAIText('# Remediation\n- **Review** ' + tick + 'aegis scan' + tick + '\n\n' + tick + tick + tick + 'sh\necho safe\n' + tick + tick + tick);
+  if (!formatted.includes('<h4>Remediation</h4>') || !formatted.includes('<strong>Review</strong>') || !formatted.includes('<pre class="ai-code">')) {
+    throw new Error('AI response formatting did not render expected Markdown: ' + formatted);
+  }
+  const escaped = sandbox.renderAIText('<img src=x onerror=alert(1)>');
+  if (escaped.includes('<img')) {
+    throw new Error('AI response formatter did not escape HTML: ' + escaped);
+  }
 })().catch((err) => {
   console.error(err && err.stack || err);
   process.exit(1);

@@ -211,6 +211,8 @@ AI:
 
 ```sh
 aegis ai install
+aegis ai plan
+aegis ai plan --profile balanced
 aegis ai setup
 aegis ai setup --json
 aegis ai setup --download-llama
@@ -295,15 +297,27 @@ Recommended local path:
 aegis ai install
 ```
 
+`aegis ai plan` reports the local profile before Aegis downloads or starts a
+model: detected memory, bounded CPU threads, context size, batch size, selected
+model and whether the requested profile is suitable. The default `compact`
+profile uses Gemma 3 1B and is designed to leave headroom on 8 GB machines.
+`balanced` is an explicit Gemma 3 4B profile for systems with at least 16 GB:
+
+```sh
+aegis ai plan
+aegis ai install --profile compact
+aegis ai install --profile balanced
+```
+
 `aegis ai install` is the one-command default. It reuses the matching installed
 llama.cpp release and Hugging Face cache when available; otherwise it downloads
 the matching release for your OS/CPU, configures Aegis for
 `http://127.0.0.1:8080/v1/chat/completions`, starts `llama-server` with the
 recommended compact Gemma GGUF Hugging Face ref, and writes server logs to the
-Aegis config directory. It uses one server slot, a 2K context, bounded CPU
-threads, CPU-only inference, and text-only mode to keep 8 GB machines responsive.
-It is safe to run
-again; if a compatible server is already running, Aegis reuses it.
+Aegis config directory. The compact profile uses one server slot, a 1K context,
+a 128-token batch, two or three CPU threads, CPU-only inference, and text-only
+mode to keep 8 GB machines responsive. It is safe to run again; if a compatible
+server is already running, Aegis reuses it.
 
 To release the model's memory and CPU when you are finished:
 
@@ -325,7 +339,7 @@ aegis ai setup --download-llama
 Server mode:
 
 ```sh
-llama-server -hf ggml-org/gemma-3-1b-it-GGUF:Q4_K_M --no-mmproj --ctx-size 2048 --batch-size 256 --parallel 1 --n-gpu-layers 0 --no-kv-offload --host 127.0.0.1 --port 8080
+llama-server -hf ggml-org/gemma-3-1b-it-GGUF:Q4_K_M --no-mmproj --ctx-size 1024 --batch-size 128 --parallel 1 --threads 2 --n-gpu-layers 0 --no-kv-offload --host 127.0.0.1 --port 8080
 aegis ai config --backend llamacpp-server --endpoint http://127.0.0.1:8080/v1/chat/completions
 ```
 
