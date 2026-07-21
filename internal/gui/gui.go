@@ -729,7 +729,12 @@ func (s *Server) aiInstall(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"state": "idle", "message": "No AI installation has been started in this GUI session."})
 			return
 		}
-		if job.State == "complete" && job.Stage == "waiting" {
+		if job.Stage == "waiting" && (job.State == "waiting" || job.State == "complete") {
+			s.normalizeAIInstallWaiting()
+			s.aiInstallMu.RLock()
+			copy := *s.aiInstallJob
+			s.aiInstallMu.RUnlock()
+			job = &copy
 			cfg, err := ai.Load()
 			if err == nil && aiConfigReady(ai.Check(cfg)) {
 				s.markAIInstallReady()
@@ -768,14 +773,26 @@ func (s *Server) aiInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, &copy)
 }
 
+func (s *Server) normalizeAIInstallWaiting() {
+	s.aiInstallMu.Lock()
+	defer s.aiInstallMu.Unlock()
+	if s.aiInstallJob == nil || s.aiInstallJob.Stage != "waiting" || s.aiInstallJob.State != "complete" {
+		return
+	}
+	s.aiInstallJob.State = "waiting"
+	s.aiInstallJob.FinishedAt = ""
+}
+
 func (s *Server) markAIInstallReady() {
 	s.aiInstallMu.Lock()
 	defer s.aiInstallMu.Unlock()
-	if s.aiInstallJob == nil || s.aiInstallJob.State != "complete" || s.aiInstallJob.Stage != "waiting" {
+	if s.aiInstallJob == nil || s.aiInstallJob.Stage != "waiting" || (s.aiInstallJob.State != "waiting" && s.aiInstallJob.State != "complete") {
 		return
 	}
+	s.aiInstallJob.State = "complete"
 	s.aiInstallJob.Stage = "ready"
 	s.aiInstallJob.Message = "Gemma is ready to answer locally"
+	s.aiInstallJob.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	s.aiInstallJob.Next = []string{"Ask a question below or in the Aegis TUI AI tab.", "Aegis will also add advisory diagnostics to scan, shield, network, firewall, audit, and checkup results."}
 }
 
@@ -807,14 +824,16 @@ func (s *Server) runAIInstall() {
 		s.emit("ai", "GUI AI install failed: "+err.Error(), true)
 		return
 	}
-	s.aiInstallJob.State = "complete"
 	if plan.Run != nil && plan.Run.Ready {
+		s.aiInstallJob.State = "complete"
 		s.aiInstallJob.Stage = "ready"
 		s.aiInstallJob.Message = "Gemma is ready to answer locally"
 		s.aiInstallJob.Next = []string{"Ask a question in the Aegis AI tab or TUI.", "Use Check AI status any time to confirm the local server is available."}
 	} else {
+		s.aiInstallJob.State = "waiting"
 		s.aiInstallJob.Stage = "waiting"
 		s.aiInstallJob.Message = "llama-server is running; Gemma is still downloading or loading"
+		s.aiInstallJob.FinishedAt = ""
 		s.aiInstallJob.Next = []string{"Keep this window open while Gemma downloads on the first run.", "Select Check AI status in a minute; it will report when the model is ready."}
 	}
 	s.emit("ai", "GUI installed and started local AI", false)
@@ -1127,11 +1146,12 @@ code{background:var(--panel2);border:1px solid var(--line2);border-radius:5px;pa
 .check-list{margin:8px 0 0;padding-left:18px;color:var(--muted)}
 .check-list li{margin:3px 0;overflow-wrap:anywhere}
 .check-summary{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:6px 0 12px}
+.ai-status{margin-top:14px;padding:11px 13px;border:1px solid var(--line);border-radius:8px;background:var(--panel2)}.ai-status p{margin:0}.ai-status p+p{margin-top:5px}
 .install-job{margin-top:14px;border:1px solid var(--line2);border-left:3px solid var(--accent);border-radius:8px;background:var(--panel2);padding:13px}
 .install-job.ok{border-left-color:var(--green)}.install-job.warn{border-left-color:var(--yellow)}.install-job.bad{border-left-color:var(--red)}
 .install-job .item-head{margin-bottom:5px}.install-job progress{display:block;width:100%;height:8px;margin:10px 0 5px;accent-color:var(--accent)}
 .install-job .next{margin:9px 0 0;padding-left:18px;color:var(--muted)}
-.ai-chat{margin-top:16px;border-top:1px solid var(--line);padding-top:16px}.chat-log{min-height:120px;max-height:330px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:11px}.chat-message{padding:9px 10px;border-radius:7px;margin:0 0 9px;white-space:pre-wrap;overflow-wrap:anywhere}.chat-message.user{background:var(--panel2);margin-left:12%}.chat-message.assistant{border-left:3px solid var(--green);background:rgba(166,227,161,.06);margin-right:5%}.chat-message .chat-label{display:block;color:var(--faint);font-size:10.5px;text-transform:uppercase;margin-bottom:4px}.chat-compose{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;margin-top:9px}.chat-compose textarea{min-height:54px}.ai-advice{margin-top:12px;border-left:3px solid var(--green);padding:10px 12px;background:rgba(166,227,161,.05);border-radius:0 7px 7px 0;white-space:pre-wrap;overflow-wrap:anywhere}.ai-advice.pending{border-left-color:var(--accent);color:var(--muted)}.ai-advice.unavailable{border-left-color:var(--line2);color:var(--faint)}
+.ai-chat{margin-top:18px;border-top:1px solid var(--line);padding-top:16px}.chat-log{min-height:120px;max-height:330px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:11px}.ai-chat:not(.ready) .chat-log{min-height:0;padding:10px 12px}.ai-chat:not(.ready) .chat-compose{display:none}.chat-message{padding:9px 10px;border-radius:7px;margin:0 0 9px;white-space:pre-wrap;overflow-wrap:anywhere}.chat-message.user{background:var(--panel2);margin-left:12%}.chat-message.assistant{border-left:3px solid var(--green);background:rgba(166,227,161,.06);margin-right:5%}.chat-message .chat-label{display:block;color:var(--faint);font-size:10.5px;text-transform:uppercase;margin-bottom:4px}.chat-compose{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;margin-top:9px}.chat-compose textarea{min-height:54px}.ai-context{margin-top:18px;border-top:1px solid var(--line);padding-top:16px}.ai-advice{margin-top:12px;border-left:3px solid var(--green);padding:10px 12px;background:rgba(166,227,161,.05);border-radius:0 7px 7px 0;white-space:pre-wrap;overflow-wrap:anywhere}.ai-advice.pending{border-left-color:var(--accent);color:var(--muted)}.ai-advice.unavailable{border-left-color:var(--line2);color:var(--faint)}
 
 .pill{display:inline-block;border-radius:5px;padding:2px 7px;font-size:10.5px;font-weight:700;letter-spacing:.02em;text-transform:uppercase}
 .pill.bad{background:rgba(243,139,168,.14);color:var(--red)}
@@ -1223,16 +1243,18 @@ footer a{color:var(--faint)}
     <h2><span class="ic" data-ic="ai"></span>AI Assistant</h2>
     <p class="muted">Shows local llama.cpp readiness and the setup path. The model is advisory only; detections still come from signatures, rules, canaries, and audits.</p>
     <div class="actions"><button id="aiInstallBtn" class="primary" onclick="aiInstall()">Install & run local AI</button><button onclick="aiStatus()">Check AI status</button><button onclick="aiSetup()">Setup guide</button></div>
-    <div id="aiStatusOut" class="muted" style="margin-top:14px">Checking AI availability…</div>
+    <div id="aiStatusOut" class="ai-status muted">Checking AI availability…</div>
+    <div id="aiOut" class="muted" style="margin-top:14px" aria-live="polite">Choose Install & run local AI for the recommended local setup.</div>
     <div class="ai-chat" id="aiChat" aria-live="polite">
       <h3>Ask Aegis</h3>
       <div id="chatLog" class="chat-log muted">Chat becomes available when the configured AI backend is ready.</div>
       <div class="chat-compose"><textarea id="chatPrompt" disabled placeholder="Ask about a finding, a safe remediation plan, or your system posture."></textarea><button id="chatSendBtn" class="primary" disabled onclick="aiChat()">Send</button></div>
     </div>
-    <h3>Remember local context</h3>
-    <textarea id="note" placeholder="Example: This Mac is used for development; ignore known local dev servers on 127.0.0.1."></textarea>
-    <div class="actions"><button onclick="remember()">Remember note</button></div>
-    <div id="aiOut" class="muted" style="margin-top:14px" aria-live="polite">Choose Install & run local AI for the recommended local setup.</div>
+    <div class="ai-context">
+      <h3>Remember local context</h3>
+      <textarea id="note" placeholder="Example: This Mac is used for development; ignore known local dev servers on 127.0.0.1."></textarea>
+      <div class="actions"><button onclick="remember()">Remember note</button></div>
+    </div>
   </div>
 
   <div class="panel view" data-view="history">
@@ -1279,7 +1301,7 @@ async function api(path,opts){const r=await fetch(path,opts); if(!r.ok) throw ne
 function initNav(){ $('nav').innerHTML=views.map(v=>'<button id="nav-'+v+'" onclick="showView(\''+v+'\')"><span class="ic" data-ic="'+navIcon(v)+'"></span>'+label(v)+'</button>').join(''); showView(currentView); paintIcons()}
 function label(v){return {dashboard:'Dashboard',scan:'Scanner',shield:'Shield',network:'Network',firewall:'Firewall',audit:'Audit',checkup:'Checkup',ai:'AI',history:'History',details:'Details'}[v]||v}
 function navIcon(v){return {dashboard:'check',scan:'scan',shield:'shield',network:'net',firewall:'fw',audit:'audit',checkup:'check',ai:'ai',history:'hist',details:'code'}[v]||'code'}
-function showView(v){currentView=v; document.querySelectorAll('.view').forEach(function(el){el.classList.toggle('active', el.dataset.view===v)}); views.forEach(function(x){const b=$('nav-'+x); if(b) b.classList.toggle('active',x===v)}); if(v==='ai') aiStatus()}
+function showView(v){currentView=v; document.querySelectorAll('.view').forEach(function(el){el.classList.toggle('active', el.dataset.view===v)}); views.forEach(function(x){const b=$('nav-'+x); if(b) b.classList.toggle('active',x===v)}); if(v==='ai'){aiStatus();pollAIInstall()}}
 let syncState='', syncLabel='syncing…', lastSyncAt='', startupTimer=null;
 function isoNow(){return new Date().toISOString()}
 function setSync(state,label,touch){syncState=state; syncLabel=label; if(!state && touch){lastSyncAt=isoNow()} renderSync()}
@@ -1349,15 +1371,15 @@ function commandRows(label,commands){return (commands||[]).filter(Boolean).map(c
 function renderCheckCard(c){const sev=severity(c.status); let html='<div class="item sev-'+sev+'"><div class="item-head"><span class="who"><span class="pill '+sev+'">'+esc(c.status||'unknown')+'</span> '+esc(c.name)+'</span><span class="muted small">'+esc(c.duration||'')+'</span></div><div class="detail">'+esc(c.summary)+'</div>'; if(c.command){html+=commandRows('Check', [c.command])} if(c.status!=='ok'&&(c.remediation||[]).length){html+=commandRows('Fix', c.remediation)} if((c.items||[]).length){html+='<ul class="check-list">'+c.items.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'} if(c.error){html+='<div class="detail bad">error: '+esc(c.error)+'</div>'} return html+'</div>'}
 function renderCheckup(r){const checks=[...(r.updates||[]),...(r.dependencies||[])]; const warn=checks.filter(c=>c.status==='warn').length, err=checks.filter(c=>c.status==='error').length; let html='<div class="check-summary"><span><b>'+esc(r.os?.name||r.os?.goos)+'</b> '+esc(r.os?.version||'')+'</span><span class="'+(warn?'warn':'ok')+'">'+warn+' warnings</span><span class="'+(err?'bad':'ok')+'">'+err+' errors</span><span class="muted">collected '+esc(formatISO(r.collected_at))+'</span></div>'; const fixes=checks.flatMap(c=>(c.status==='warn'||c.status==='error')?(c.remediation||[]):[]); if(fixes.length){html+='<h3>What to run next</h3>'+commandRows('Fix', fixes)} else {html+='<p class="ok">No local update remediation commands are needed right now.</p>'} html+='<h3>Checks</h3>'+checks.map(renderCheckCard).join(''); if((r.recommendations||[]).length){html+='<h3>Recommendations</h3><ul class="check-list">'+r.recommendations.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'} if((r.unsupported_checks||[]).length){html+='<h3>Unsupported or inconclusive</h3><ul class="check-list">'+r.unsupported_checks.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'} const kev=r.vulnerabilities?.recent_kev||[], nvd=r.vulnerabilities?.recent_critical||[]; html+='<h3>Security feeds</h3><p class="'+(kev.length||nvd.length?'warn':'ok')+'">'+kev.length+' recent CISA KEV · '+nvd.length+' recent critical NVD CVEs.</p>'; if(kev.length){html+=kev.slice(0,5).map(v=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">KEV</span> '+esc(v.cve)+' · '+esc(v.vendor_project)+' '+esc(v.product)+'</span><span class="muted small">'+esc(v.date_added)+'</span></div><div class="detail">'+esc(v.vulnerability_name)+'</div><div class="detail">Required action: '+esc(v.required_action||'review vendor guidance and patch or mitigate')+'</div></div>').join('')} if(nvd.length){html+=nvd.slice(0,5).map(v=>'<div class="item sev-warn"><div class="item-head"><span class="who"><span class="pill warn">NVD</span> '+esc(v.id)+' · score '+esc(v.score||'?')+'</span><span class="muted small">'+esc(formatISO(v.published))+'</span></div><div class="detail">'+esc(v.summary||'Review vendor guidance and patch affected software if present.')+'</div></div>').join('')} if((r.vulnerabilities?.errors||[]).length){html+='<h3>Feed errors</h3><ul class="check-list">'+r.vulnerabilities.errors.map(x=>'<li class="bad">'+esc(x)+'</li>').join('')+'</ul>'} return html}
 let aiReady=false;
-function setChatReady(ready){aiReady=!!ready;$('chatPrompt').disabled=!aiReady;$('chatSendBtn').disabled=!aiReady;const log=$('chatLog');if(aiReady&&!log.dataset.greeted){log.dataset.greeted='yes';log.className='chat-log';log.innerHTML='<div class="chat-message assistant"><span class="chat-label">Aegis Local Analyst</span>Ready. Ask about a finding, system posture, or a safe remediation plan.</div>'}else if(!aiReady&&!log.dataset.greeted){log.className='chat-log muted';log.textContent='Chat becomes available when the configured AI backend is ready.'}}
+function setChatReady(ready){aiReady=!!ready;$('chatPrompt').disabled=!aiReady;$('chatSendBtn').disabled=!aiReady;$('aiChat').classList.toggle('ready',aiReady);const log=$('chatLog');if(aiReady&&!log.dataset.greeted){log.dataset.greeted='yes';log.className='chat-log';log.innerHTML='<div class="chat-message assistant"><span class="chat-label">Aegis Local Analyst</span>Ready. Ask about a finding, system posture, or a safe remediation plan.</div>'}else if(!aiReady&&!log.dataset.greeted){log.className='chat-log muted';log.textContent='Chat becomes available when the configured AI backend is ready.'}}
 async function aiStatus(){const out=$('aiStatusOut');out.textContent='Checking AI backend...';try{const r=await api('/api/ai/status');setDetails('AI status',r);const s=r.status||{},ready=!!r.ready;setChatReady(ready);out.innerHTML='<p class="'+(ready?'ok':'warn')+'">'+(ready?'● Local AI is ready. Chat and service diagnostics are enabled.':'○ AI is still preparing or unavailable.')+'</p><p class="muted">'+esc(s.message||'No status message.')+'</p><p class="muted small">Backend: '+esc(s.config?.backend||'unknown')+' · Privacy: '+esc(s.config?.privacy_mode||'metadata')+' · Notes: '+esc((r.notes||[]).length)+'</p>'}catch(e){setChatReady(false);out.innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function aiChat(){if(!aiReady)return;const prompt=$('chatPrompt').value.trim();if(!prompt)return;const log=$('chatLog');const send=$('chatSendBtn');log.className='chat-log';log.innerHTML+='<div class="chat-message user"><span class="chat-label">You</span>'+esc(prompt)+'</div><div class="chat-message assistant pending" id="chatPending"><span class="chat-label">Aegis Local Analyst</span>Thinking…</div>';$('chatPrompt').value='';send.disabled=true;log.scrollTop=log.scrollHeight;try{const r=await api('/api/ai/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});const pending=$('chatPending');if(pending){pending.className='chat-message assistant';pending.innerHTML='<span class="chat-label">Aegis Local Analyst</span>'+esc(r.answer)}}catch(e){const pending=$('chatPending');if(pending){pending.className='chat-message assistant bad';pending.innerHTML='<span class="chat-label">Aegis Local Analyst</span>'+esc(e.message)}await aiStatus()}finally{send.disabled=!aiReady;log.scrollTop=log.scrollHeight}}
 async function aiAdvice(targetId,service,summary){if(!aiReady)return;const target=$(targetId);if(!target)return;const id='advice-'+Date.now()+'-'+Math.floor(Math.random()*1000);target.innerHTML+='<div class="ai-advice pending" id="'+id+'">AI is reviewing this '+esc(service)+' result…</div>';try{const r=await api('/api/ai/advice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service,summary:JSON.stringify(summary)})});const box=$(id);if(box){box.className='ai-advice';box.innerHTML='<b>AI advisory</b><br>'+esc(r.answer)}}catch(e){const box=$(id);if(box){box.className='ai-advice unavailable';box.textContent='AI advisory unavailable: '+e.message}if(String(e.message).includes('AI is not ready'))await aiStatus()}}
 let aiInstallPoll=null;
 function formatBytes(n){if(!Number.isFinite(n)||n<=0)return '';const units=['B','KB','MB','GB'];let i=0,v=n;while(v>=1024&&i<units.length-1){v/=1024;i++}return (i? v.toFixed(v>=10?0:1):v)+' '+units[i]}
 function aiStage(stage){return ({prepare:'Preparing',discover:'Finding llama.cpp',download:'Downloading llama.cpp',verify:'Verifying download',extract:'Extracting llama.cpp',configure:'Configuring Aegis',start:'Starting server',waiting:'Preparing Gemma',ready:'Ready',complete:'Complete',failed:'Needs attention'})[stage]||'Working'}
-function renderAIInstall(job){const btn=$('aiInstallBtn');const running=job.state==='running';btn.disabled=running;btn.textContent=running?'Installing local AI...':'Install & run local AI';const sev=job.state==='failed'?'bad':job.stage==='ready'?'ok':job.stage==='waiting'?'warn':'';let html='<div class="install-job '+sev+'"><div class="item-head"><span class="who"><span class="pill '+(sev||'info')+'">'+esc(aiStage(job.stage))+'</span> '+esc(job.message||'Working on local AI setup')+'</span><span class="muted small">'+esc(job.state||'idle')+'</span></div>';if(job.total_bytes>0){const pct=Math.min(100,Math.round((job.completed_bytes||0)*100/job.total_bytes));html+='<progress value="'+pct+'" max="100">'+pct+'%</progress><div class="muted small">'+pct+'% · '+esc(formatBytes(job.completed_bytes||0))+' of '+esc(formatBytes(job.total_bytes))+'</div>'}else if(running){html+='<progress aria-label="Installation in progress"></progress><div class="muted small">This step may take a while on the first run.</div>'}if(job.error){html+='<p class="bad">'+esc(job.error)+'</p>'}const run=job.plan?.run;if(run){html+='<div class="check-summary"><span>Endpoint: <code>'+esc(run.endpoint||'http://127.0.0.1:8080')+'</code></span><span>Model: <code>'+esc(run.model_ref||'Gemma GGUF')+'</code></span>';if(run.pid){html+='<span>PID: <code>'+esc(run.pid)+'</code></span>'}html+='</div>';if(run.log_file){html+='<p class="muted small">Server log: <code>'+esc(run.log_file)+'</code></p>'}}if((job.next||[]).length){html+='<h3>What to do next</h3><ul class="next">'+job.next.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'}html+='</div>';$('aiOut').innerHTML=html}
-async function pollAIInstall(){try{const job=await api('/api/ai/install');setDetails('AI install progress',job);renderAIInstall(job);if(job.state==='running'||job.stage==='waiting'){aiInstallPoll=setTimeout(pollAIInstall,1200);return}if(job.stage==='ready')await aiStatus()}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}finally{if(aiInstallPoll&&$('aiInstallBtn').disabled===false&&$('aiOut').textContent.includes('Gemma is ready')){clearTimeout(aiInstallPoll);aiInstallPoll=null}}}
+function renderAIInstall(job){const btn=$('aiInstallBtn');const running=job.state==='running';btn.disabled=running;btn.textContent=running?'Installing local AI...':'Install & run local AI';const sev=job.state==='failed'?'bad':job.stage==='ready'?'ok':job.stage==='waiting'?'warn':'';const state=job.state==='waiting'?'waiting for model':job.state||'idle';let html='<div class="install-job '+sev+'"><div class="item-head"><span class="who"><span class="pill '+(sev||'info')+'">'+esc(aiStage(job.stage))+'</span> '+esc(job.message||'Working on local AI setup')+'</span><span class="muted small">'+esc(state)+'</span></div>';if(job.total_bytes>0){const pct=Math.min(100,Math.round((job.completed_bytes||0)*100/job.total_bytes));html+='<progress value="'+pct+'" max="100">'+pct+'%</progress><div class="muted small">'+pct+'% · '+esc(formatBytes(job.completed_bytes||0))+' of '+esc(formatBytes(job.total_bytes))+'</div>'}else if(running){html+='<progress aria-label="Installation in progress"></progress><div class="muted small">This step may take a while on the first run.</div>'}if(job.error){html+='<p class="bad">'+esc(job.error)+'</p>'}const run=job.plan?.run;if(run){html+='<div class="check-summary"><span>Endpoint: <code>'+esc(run.endpoint||'http://127.0.0.1:8080')+'</code></span><span>Model: <code>'+esc(run.model_ref||'Gemma GGUF')+'</code></span>';if(run.pid){html+='<span>PID: <code>'+esc(run.pid)+'</code></span>'}html+='</div>';if(run.log_file){html+='<p class="muted small">Server log: <code>'+esc(run.log_file)+'</code></p>'}}if((job.next||[]).length){html+='<h3>What to do next</h3><ul class="next">'+job.next.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>'}html+='</div>';$('aiOut').innerHTML=html}
+async function pollAIInstall(){if(aiInstallPoll){clearTimeout(aiInstallPoll);aiInstallPoll=null}try{const job=await api('/api/ai/install');if(job.state==='idle')return;setDetails('AI install progress',job);renderAIInstall(job);if(job.state==='running'||job.state==='waiting'){aiInstallPoll=setTimeout(pollAIInstall,1200);return}if(job.stage==='ready')await aiStatus()}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
 async function aiInstall(){if(!confirm('Install or update llama.cpp, configure Aegis, and start the recommended local Gemma model? The first run downloads software and a model, so it can take several minutes.'))return;clearTimeout(aiInstallPoll);try{const job=await api('/api/ai/install',{method:'POST'});setDetails('AI install progress',job);renderAIInstall(job);pollAIInstall()}catch(e){$('aiOut').innerHTML='<span class="bad">'+esc(e.message)+'</span><p class="muted">Open Setup guide for manual fallback commands.</p>'}}
 function commandBlock(title,cmd){return cmd?'<div class="cmd-row"><span>'+esc(title)+'</span><code>'+esc(cmd)+'</code></div>':''}
 function setupSection(s){let html='<div class="item sev-ok"><div class="item-head"><span class="who"><span class="pill ok">STEP</span> '+esc(s.title||'Setup step')+'</span></div>'; if(s.why){html+='<div class="detail">'+esc(s.why)+'</div>'} for(const c of (s.commands||[])){html+='<h3>'+esc(c.label||'Command')+'</h3>'+commandBlock('Unix',c.unix)+commandBlock('PowerShell',c.powershell)+commandBlock('cmd.exe',c.cmd)} return html+'</div>'}

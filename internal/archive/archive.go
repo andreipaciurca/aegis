@@ -118,8 +118,52 @@ func extractTarGz(path, dest string) error {
 			if closeErr != nil {
 				return closeErr
 			}
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			link, err := safeLinkTarget(dest, target, h.Linkname)
+			if err != nil {
+				return err
+			}
+			if err := replaceWithSymlink(target, link); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+// safeLinkTarget verifies that a symlink target resolves inside base. Tar
+// links are relative to the link itself, unlike archive entry paths which are
+// relative to the extraction root.
+func safeLinkTarget(base, linkPath, linkName string) (string, error) {
+	if archiveEntryIsAbsolute(linkName) {
+		return "", fmt.Errorf("unsafe archive link target %q", linkName)
+	}
+	posix := path.Clean(strings.ReplaceAll(linkName, "\\", "/"))
+	resolved := filepath.Join(filepath.Dir(linkPath), filepath.FromSlash(posix))
+	rel, err := filepath.Rel(base, resolved)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("unsafe archive link target %q", linkName)
+	}
+	return filepath.FromSlash(posix), nil
+}
+
+func replaceWithSymlink(path, link string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("cannot replace archive directory with symlink: %s", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(link, path)
 }
 
 func safeJoin(base, name string) (string, error) {

@@ -57,6 +57,33 @@ func writeTarGz(t *testing.T, path string, files map[string]string) {
 	}
 }
 
+func writeTarGzEntries(t *testing.T, path string, entries []*tar.Header, bodies []string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	compressed := gzip.NewWriter(f)
+	writer := tar.NewWriter(compressed)
+	for i, header := range entries {
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatal(err)
+		}
+		if bodies[i] != "" {
+			if _, err := writer.Write([]byte(bodies[i])); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestExtractZip(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "a.zip")
@@ -132,6 +159,52 @@ func TestExtractTarGzRejectsAbsolutePath(t *testing.T) {
 	}
 	if err := Extract(tarPath, dest); err == nil {
 		t.Fatal("expected an error for an absolute-path entry, got nil")
+	}
+}
+
+func TestExtractTarGzPreservesSafeSymlink(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "links.tar.gz")
+	writeTarGzEntries(t, tarPath, []*tar.Header{
+		{Name: "llama/libllama.0.0.10075.dylib", Mode: 0o644, Size: 7},
+		{Name: "llama/libllama.0.dylib", Typeflag: tar.TypeSymlink, Linkname: "libllama.0.0.10075.dylib"},
+	}, []string{"runtime", ""})
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Extract(tarPath, dest); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	link := filepath.Join(dest, "llama", "libllama.0.dylib")
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s is not a symlink", link)
+	}
+	got, err := os.Readlink(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "libllama.0.0.10075.dylib" {
+		t.Fatalf("link target = %q", got)
+	}
+}
+
+func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "evil-links.tar.gz")
+	writeTarGzEntries(t, tarPath, []*tar.Header{
+		{Name: "llama/escape", Typeflag: tar.TypeSymlink, Linkname: "../../outside"},
+	}, []string{""})
+	dest := filepath.Join(dir, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Extract(tarPath, dest); err == nil {
+		t.Fatal("expected unsafe symlink target error, got nil")
 	}
 }
 
