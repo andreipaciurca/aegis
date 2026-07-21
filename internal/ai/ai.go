@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,9 @@ const (
 	DefaultURL              = "http://127.0.0.1:8080/v1/chat/completions"
 	DefaultRemoteURL        = "https://api.openai.com/v1/chat/completions"
 	DefaultRemoteKeyEnv     = "OPENAI_API_KEY"
-	DefaultModelRef         = "lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M"
+	// DefaultModelRef deliberately favors responsive local diagnostics on
+	// 8 GB laptops. Larger models remain documented as opt-in alternatives.
+	DefaultModelRef = "ggml-org/gemma-3-1b-it-GGUF:Q4_K_M"
 )
 
 type Config struct {
@@ -167,21 +170,23 @@ func Check(cfg Config) Status {
 	}
 	if cfg.Endpoint != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, err := generateServer(ctx, cfg, Request{Prompt: "Reply with: ok"})
+		err := checkServerHealth(ctx, cfg.Endpoint)
 		cancel()
 		s.ServerReady = err == nil
 		if err != nil {
 			s.Message = "server unavailable: " + err.Error()
 		}
 	}
-	cmd := cfg.Command
-	if cmd == "" {
-		cmd = "llama-cli"
-	}
-	if _, err := exec.LookPath(cmd); err == nil {
-		s.CLIReady = true
-	} else if s.Message == "" {
-		s.Message = "llama-cli not found"
+	if cfg.Backend == BackendCLI {
+		cmd := cfg.Command
+		if cmd == "" {
+			cmd = "llama-cli"
+		}
+		if _, err := exec.LookPath(cmd); err == nil {
+			s.CLIReady = true
+		} else if s.Message == "" {
+			s.Message = "llama-cli not found"
+		}
 	}
 	if s.ServerReady || s.CLIReady {
 		s.Message = "ready"
@@ -286,31 +291,31 @@ func PlanSetup() (SetupPlan, error) {
 	homeModel := filepath.Join(modelDir, "gemma.gguf")
 	modelSources := []ModelSource{
 		{
-			Name:     "Gemma 4 E4B instruct GGUF",
-			URL:      "https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF",
+			Name:     "Gemma 3 1B instruct GGUF (compact default)",
+			URL:      "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF",
 			Ref:      DefaultModelRef,
-			Filename: "gemma-4-E4B-it-Q4_K_M.gguf",
-			Note:     "Recommended first try on modern laptops/desktops: small, instruction-tuned, and available as Q4_K_M GGUF.",
+			Filename: "gemma-3-1b-it-Q4_K_M.gguf",
+			Note:     "Default for 8 GB laptops: approximately 806 MB, text-only, and fast enough for Aegis diagnostics.",
 		},
 		{
 			Name:     "Gemma 3 4B instruct GGUF",
-			URL:      "https://huggingface.co/bartowski/google_gemma-3-4b-it-GGUF",
-			Ref:      "bartowski/google_gemma-3-4b-it-GGUF:Q4_K_M",
-			Filename: "google_gemma-3-4b-it-Q4_K_M.gguf",
-			Note:     "Fallback if the latest Gemma 4 GGUF is too new for your llama.cpp build.",
+			URL:      "https://huggingface.co/ggml-org/gemma-3-4b-it-GGUF",
+			Ref:      "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M",
+			Filename: "gemma-3-4b-it-Q4_K_M.gguf",
+			Note:     "Higher-quality option for systems with at least 16 GB of unified or system memory.",
 		},
 		{
-			Name:     "Google Gemma 2B instruct GGUF",
-			URL:      "https://huggingface.co/google/gemma-2b-it-GGUF",
-			Ref:      "google/gemma-2b-it-GGUF",
-			Filename: "gemma-2b-it.gguf",
-			Note:     "Smallest fallback from Google; check the model card and license before operational use.",
+			Name:     "Gemma 4 E4B instruct GGUF",
+			URL:      "https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF",
+			Ref:      "lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M",
+			Filename: "gemma-4-E4B-it-Q4_K_M.gguf",
+			Note:     "Large multimodal option. Do not use on 8 GB machines; it can exhaust unified GPU memory.",
 		},
 	}
 	sections := []SetupSection{
 		{
 			Title: "0. One-command default",
-			Why:   "Recommended for most users. It installs or updates llama.cpp, configures Aegis, starts the default Gemma server locally, and can be run again safely.",
+			Why:   "Recommended for most users. It reuses an installed current llama.cpp build and cached model when available, configures Aegis, then starts the compact local Gemma profile.",
 			Commands: []SetupCommand{{
 				Label:      "Install and run",
 				Unix:       "aegis ai install",
@@ -345,17 +350,17 @@ func PlanSetup() (SetupPlan, error) {
 		},
 		{
 			Title: "3. Download a model",
-			Why:   "Fastest path uses llama.cpp's Hugging Face loader. Manual fallback stores a GGUF file in the Aegis model folder.",
+			Why:   "The compact default is text-only and tuned to leave headroom on 8 GB laptops. llama.cpp reuses its Hugging Face cache after the first download.",
 			Commands: []SetupCommand{{
 				Label:      "Auto-download via llama.cpp",
-				Unix:       "llama-server -hf " + DefaultModelRef + " --host 127.0.0.1 --port 8080",
-				PowerShell: "llama-server -hf " + DefaultModelRef + " --host 127.0.0.1 --port 8080",
-				Cmd:        "llama-server -hf " + DefaultModelRef + " --host 127.0.0.1 --port 8080",
+				Unix:       "llama-server -hf " + DefaultModelRef + " --no-mmproj --ctx-size 2048 --batch-size 256 --parallel 1 --n-gpu-layers 0 --no-kv-offload --host 127.0.0.1 --port 8080",
+				PowerShell: "llama-server -hf " + DefaultModelRef + " --no-mmproj --ctx-size 2048 --batch-size 256 --parallel 1 --n-gpu-layers 0 --no-kv-offload --host 127.0.0.1 --port 8080",
+				Cmd:        "llama-server -hf " + DefaultModelRef + " --no-mmproj --ctx-size 2048 --batch-size 256 --parallel 1 --n-gpu-layers 0 --no-kv-offload --host 127.0.0.1 --port 8080",
 			}, {
 				Label:      "Manual Hugging Face fallback",
-				Unix:       "python -m pip install -U huggingface_hub\nhuggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF " + modelSources[0].Filename + " --local-dir \"$AEGIS_MODEL_DIR\" --local-dir-use-symlinks False",
-				PowerShell: "python -m pip install -U huggingface_hub\nhuggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF " + modelSources[0].Filename + " --local-dir \"$env:AEGIS_MODEL_DIR\" --local-dir-use-symlinks False",
-				Cmd:        "python -m pip install -U huggingface_hub\nhuggingface-cli download lmstudio-community/gemma-4-E4B-it-GGUF " + modelSources[0].Filename + " --local-dir \"%AEGIS_MODEL_DIR%\" --local-dir-use-symlinks False",
+				Unix:       "python -m pip install -U huggingface_hub\nhuggingface-cli download ggml-org/gemma-3-1b-it-GGUF " + modelSources[0].Filename + " --local-dir \"$AEGIS_MODEL_DIR\" --local-dir-use-symlinks False",
+				PowerShell: "python -m pip install -U huggingface_hub\nhuggingface-cli download ggml-org/gemma-3-1b-it-GGUF " + modelSources[0].Filename + " --local-dir \"$env:AEGIS_MODEL_DIR\" --local-dir-use-symlinks False",
+				Cmd:        "python -m pip install -U huggingface_hub\nhuggingface-cli download ggml-org/gemma-3-1b-it-GGUF " + modelSources[0].Filename + " --local-dir \"%AEGIS_MODEL_DIR%\" --local-dir-use-symlinks False",
 			}},
 		},
 		{
@@ -383,7 +388,7 @@ func PlanSetup() (SetupPlan, error) {
 		InstallDir:      installDir,
 		ModelDir:        modelDir,
 		ModelFile:       homeModel,
-		Recommended:     "Gemma 4 E4B or Gemma 3 4B instruction-tuned GGUF, Q4_K_M quantization",
+		Recommended:     "Gemma 3 1B instruction-tuned GGUF, Q4_K_M quantization (compact default for 8 GB laptops)",
 		LlamaReleaseURL: "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest",
 		ModelSources:    modelSources,
 		Sections:        sections,
@@ -391,6 +396,7 @@ func PlanSetup() (SetupPlan, error) {
 		Notes: []string{
 			"aegis queries llama.cpp releases at setup time so it can use the current build instead of a hardcoded tag",
 			"setup commands are idempotent for the current user on macOS, Linux/Unix and Windows; they avoid hardcoded usernames",
+			"model weights are cached by llama.cpp; repeat setup reuses the selected cached model instead of downloading it again",
 			"model weights are separate; download GGUF files only from sources you trust, review the model card/license and pin checksums for operational use",
 			"local llama.cpp remains the default privacy-preserving path; remote API backends are opt-in",
 		},
@@ -461,6 +467,7 @@ func generateServer(ctx context.Context, cfg Config, req Request) (string, error
 	}
 	body := map[string]any{
 		"model":       model,
+		"max_tokens":  384,
 		"temperature": 0.2,
 		"messages": []map[string]string{
 			{"role": "system", "content": req.System},
@@ -506,6 +513,35 @@ func generateServer(ctx context.Context, cfg Config, req Request) (string, error
 		return "", errors.New("no model response")
 	}
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+}
+
+func checkServerHealth(ctx context.Context, endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return err
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("invalid server endpoint %q", endpoint)
+	}
+	// /v1/models confirms that the OpenAI-compatible server has loaded a model
+	// without dispatching a completion. This keeps routine UI status polling
+	// from waking the model or allocating a decode batch.
+	u.Path = "/v1/models"
+	u.RawQuery = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		return fmt.Errorf("health HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return nil
 }
 
 func shellQuote(s string) string {

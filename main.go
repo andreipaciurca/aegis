@@ -138,6 +138,7 @@ everyday:
   update                refresh signatures, check for aegis/llama.cpp updates
   gui                   local browser GUI
   ai install            one-command local llama.cpp + Gemma setup
+  ai stop               safely release local AI memory and CPU
 
 protection:
   shield                ransomware canaries + encrypted-file sweep
@@ -226,6 +227,7 @@ Use --offline to skip online vulnerability feeds.`)
 		fmt.Println(`aegis ai status
 aegis ai install [--json]
 aegis ai setup [--download-llama|--run] [--json]
+aegis ai stop [--json]
 aegis ai config --backend llamacpp-server --endpoint URL
 aegis ai test [prompt]
 aegis ai chat
@@ -849,8 +851,21 @@ func cliAI(args []string) int {
 		}
 		encodeJSON(notes)
 		return 0
+	case "stop":
+		_, jsonMode := splitJSON(args[1:])
+		result, err := ai.StopManagedServer()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ai stop:", err)
+			return 1
+		}
+		if jsonMode {
+			encodeJSON(result)
+			return 0
+		}
+		fmt.Println(result.Message)
+		return 0
 	default:
-		fmt.Fprintln(os.Stderr, "usage: aegis ai status | install | setup | config [--backend ... --endpoint ... --model ... --remote-model ... --command ... --api-key-env ... --privacy metadata|excerpt] | test [prompt] | chat | remember <note> | context")
+		fmt.Fprintln(os.Stderr, "usage: aegis ai status | install | setup | stop | config [--backend ... --endpoint ... --model ... --remote-model ... --command ... --api-key-env ... --privacy metadata|excerpt] | test [prompt] | chat | remember <note> | context")
 		return 2
 	}
 }

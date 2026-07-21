@@ -302,9 +302,11 @@ func TestEmbeddedGUIHasExpectedShellContracts(t *testing.T) {
 		`/api/status`,
 		`/api/update`,
 		`/api/ai/install`,
+		`/api/ai/stop`,
 		`/api/ai/chat`,
 		`/api/ai/advice`,
 		`onclick="aiInstall()"`,
+		`onclick="aiStop()"`,
 		`id="chatPrompt"`,
 		`id="chatSendBtn"`,
 	}

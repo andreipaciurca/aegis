@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,44 +125,51 @@ func RunSetup(opts SetupOptions) (SetupPlan, error) {
 		plan.Commands = append(plan.Commands, "aegis ai setup --download-llama")
 		return plan, nil
 	}
-	reportSetupProgress(opts, SetupProgress{Stage: "download", Message: "Downloading " + asset.Name, TotalBytes: asset.Size})
 	target := filepath.Join(plan.InstallDir, rel.TagName)
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return plan, err
 	}
-	archivePath := filepath.Join(target, asset.Name)
-	sum, err := downloadFile(asset.BrowserDownloadURL, archivePath, func(done, total int64) {
-		reportSetupProgress(opts, SetupProgress{
-			Stage:          "download",
-			Message:        "Downloading " + asset.Name,
-			CompletedBytes: done,
-			TotalBytes:     total,
-		})
-	})
-	if err != nil {
-		return plan, err
-	}
-	reportSetupProgress(opts, SetupProgress{Stage: "verify", Message: "Verifying the llama.cpp download checksum"})
-	if asset.Digest != "" && strings.HasPrefix(asset.Digest, "sha256:") {
-		want := strings.TrimPrefix(asset.Digest, "sha256:")
-		if !strings.EqualFold(sum, want) {
-			return plan, fmt.Errorf("llama.cpp asset checksum mismatch: got %s want %s", sum, want)
-		}
-	}
-	reportSetupProgress(opts, SetupProgress{Stage: "extract", Message: "Extracting llama.cpp"})
-	if err := archive.Extract(archivePath, target); err != nil {
-		return plan, err
-	}
-	serverPath, serverErr := findLlamaBinary(target, "llama-server")
-	if serverErr == nil {
+	if serverPath, serverErr := findLlamaBinary(target, "llama-server"); serverErr == nil {
 		plan.LlamaServer = serverPath
+		plan.Commands = append(plan.Commands, "reusing installed llama.cpp: "+serverPath)
+		reportSetupProgress(opts, SetupProgress{Stage: "reuse", Message: "Using installed " + rel.TagName + "; no llama.cpp download needed"})
+	} else {
+		reportSetupProgress(opts, SetupProgress{Stage: "download", Message: "Downloading " + asset.Name, TotalBytes: asset.Size})
+		archivePath := filepath.Join(target, asset.Name)
+		sum, err := downloadFile(asset.BrowserDownloadURL, archivePath, func(done, total int64) {
+			reportSetupProgress(opts, SetupProgress{
+				Stage:          "download",
+				Message:        "Downloading " + asset.Name,
+				CompletedBytes: done,
+				TotalBytes:     total,
+			})
+		})
+		if err != nil {
+			return plan, err
+		}
+		reportSetupProgress(opts, SetupProgress{Stage: "verify", Message: "Verifying the llama.cpp download checksum"})
+		if asset.Digest != "" && strings.HasPrefix(asset.Digest, "sha256:") {
+			want := strings.TrimPrefix(asset.Digest, "sha256:")
+			if !strings.EqualFold(sum, want) {
+				return plan, fmt.Errorf("llama.cpp asset checksum mismatch: got %s want %s", sum, want)
+			}
+		}
+		reportSetupProgress(opts, SetupProgress{Stage: "extract", Message: "Extracting llama.cpp"})
+		if err := archive.Extract(archivePath, target); err != nil {
+			return plan, err
+		}
+		serverPath, serverErr := findLlamaBinary(target, "llama-server")
+		if serverErr != nil {
+			return plan, serverErr
+		}
+		plan.LlamaServer = serverPath
+		plan.Commands = append(plan.Commands,
+			"downloaded "+archivePath,
+			"verified sha256 "+sum,
+			"extracted to "+target,
+		)
 	}
-	plan.Commands = append(plan.Commands,
-		"downloaded "+archivePath,
-		"verified sha256 "+sum,
-		"extracted to "+target,
-		"find "+shellQuote(target)+" -name 'llama-server*' -o -name 'llama-cli*'",
-	)
+	plan.Commands = append(plan.Commands, "find "+shellQuote(target)+" -name 'llama-server*' -o -name 'llama-cli*'")
 	if opts.Configure {
 		reportSetupProgress(opts, SetupProgress{Stage: "configure", Message: "Configuring Aegis to use the local server"})
 		if err := configureDefaultServer(&plan); err != nil {
@@ -169,9 +177,10 @@ func RunSetup(opts SetupOptions) (SetupPlan, error) {
 		}
 	}
 	if opts.StartServer {
-		reportSetupProgress(opts, SetupProgress{Stage: "start", Message: "Starting llama-server and preparing Gemma"})
+		reportSetupProgress(opts, SetupProgress{Stage: "start", Message: "Starting llama-server with the compact low-memory profile"})
 		start, err := StartManagedServer(ManagedServerOptions{
 			InstallDir: plan.InstallDir,
+			ServerPath: plan.LlamaServer,
 			ModelRef:   DefaultModelRef,
 			Wait:       opts.Wait,
 			Progress:   opts.Progress,
@@ -200,6 +209,7 @@ func configureDefaultServer(plan *SetupPlan) error {
 
 type ManagedServerOptions struct {
 	InstallDir string
+	ServerPath string
 	ModelRef   string
 	Wait       time.Duration
 	Progress   func(SetupProgress)
@@ -215,6 +225,147 @@ type ManagedServerResult struct {
 	Endpoint       string `json:"endpoint"`
 	ModelRef       string `json:"model_ref"`
 	Message        string `json:"message"`
+}
+
+// StopResult describes a graceful shutdown of the Aegis local model server.
+// Aegis only stops a listener when its process name identifies it as
+// llama-server, preventing an unrelated service on port 8080 from being hit.
+type StopResult struct {
+	Stopped bool   `json:"stopped"`
+	Forced  bool   `json:"forced"`
+	PID     int    `json:"pid,omitempty"`
+	Message string `json:"message"`
+}
+
+// StopManagedServer releases the model's memory and CPU by stopping the local
+// llama-server bound to Aegis's default loopback endpoint. It first asks the
+// process to exit cleanly, then only forces it after a short grace period.
+func StopManagedServer() (StopResult, error) {
+	pid, err := localServerPID()
+	if err != nil {
+		return StopResult{Message: "no managed llama-server is listening on 127.0.0.1:8080"}, nil
+	}
+	name, err := processCommand(pid)
+	if err != nil {
+		return StopResult{}, err
+	}
+	if !strings.Contains(strings.ToLower(name), "llama-server") {
+		return StopResult{}, fmt.Errorf("refusing to stop pid %d because it is not llama-server: %s", pid, name)
+	}
+	if err := stopProcess(pid, false); err != nil {
+		return StopResult{}, err
+	}
+	if waitForServerExit(5 * time.Second) {
+		return StopResult{Stopped: true, PID: pid, Message: "llama-server stopped cleanly; model memory has been released"}, nil
+	}
+	if err := stopProcess(pid, true); err != nil {
+		return StopResult{}, err
+	}
+	if !waitForServerExit(3 * time.Second) {
+		return StopResult{}, fmt.Errorf("llama-server pid %d did not stop; inspect it before trying again", pid)
+	}
+	return StopResult{Stopped: true, Forced: true, PID: pid, Message: "llama-server was stopped after the graceful timeout; model memory has been released"}, nil
+}
+
+func localServerPID() (int, error) {
+	switch runtime.GOOS {
+	case "windows":
+		out, err := exec.Command("netstat", "-ano", "-p", "tcp").Output()
+		if err != nil {
+			return 0, err
+		}
+		return parseListenerPID(string(out), "windows")
+	default:
+		out, err := exec.Command("lsof", "-tiTCP@127.0.0.1:8080", "-sTCP:LISTEN").Output()
+		if err == nil {
+			return parseListenerPID(string(out), "unix")
+		}
+		if runtime.GOOS != "linux" {
+			return 0, err
+		}
+		// Minimal Linux images sometimes omit lsof; ss is supplied by
+		// iproute2 and includes the owning process when privileges allow it.
+		out, ssErr := exec.Command("ss", "-ltnp", "sport", "=", ":8080").Output()
+		if ssErr != nil {
+			return 0, fmt.Errorf("find local llama-server (%v; %v)", err, ssErr)
+		}
+		return parseListenerPID(string(out), "linux")
+	}
+}
+
+var ssPID = regexp.MustCompile(`pid=(\d+)`)
+
+func parseListenerPID(output, goos string) (int, error) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if goos == "linux" {
+			if !isLoopbackListener(line) {
+				continue
+			}
+			match := ssPID.FindStringSubmatch(line)
+			if len(match) == 2 {
+				pid, err := strconv.Atoi(match[1])
+				if err == nil && pid > 0 {
+					return pid, nil
+				}
+			}
+			continue
+		}
+		if goos == "windows" {
+			fields := strings.Fields(line)
+			if len(fields) < 5 || !isLoopbackListener(fields[1]) || !strings.EqualFold(fields[3], "LISTENING") {
+				continue
+			}
+			line = fields[len(fields)-1]
+		}
+		pid, err := strconv.Atoi(line)
+		if err == nil && pid > 0 {
+			return pid, nil
+		}
+	}
+	return 0, fmt.Errorf("no listener on port 8080")
+}
+
+func isLoopbackListener(address string) bool {
+	return strings.Contains(address, "127.0.0.1:8080") || strings.Contains(address, "[::1]:8080")
+}
+
+func processCommand(pid int) (string, error) {
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+func stopProcess(pid int, force bool) error {
+	if runtime.GOOS == "windows" {
+		args := []string{"/PID", strconv.Itoa(pid), "/T"}
+		if force {
+			args = append(args, "/F")
+		}
+		return exec.Command("taskkill", args...).Run()
+	}
+	signal := "-TERM"
+	if force {
+		signal = "-KILL"
+	}
+	return exec.Command("kill", signal, strconv.Itoa(pid)).Run()
+}
+
+func waitForServerExit(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := localServerPID(); err != nil {
+			return true
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
 }
 
 func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) {
@@ -239,9 +390,18 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 			Message:        "llama-server is already ready",
 		}, nil
 	}
-	server, err := resolveLlamaServer(opts.InstallDir)
-	if err != nil {
-		return ManagedServerResult{}, err
+	server := opts.ServerPath
+	if server == "" {
+		var err error
+		server, err = resolveLlamaServer(opts.InstallDir)
+		if err != nil {
+			return ManagedServerResult{}, err
+		}
+	} else if info, err := os.Stat(server); err != nil || info.IsDir() {
+		if err != nil {
+			return ManagedServerResult{}, fmt.Errorf("configured llama-server path: %w", err)
+		}
+		return ManagedServerResult{}, fmt.Errorf("configured llama-server path is a directory: %s", server)
 	}
 	if err := ensureLlamaRuntimeLinks(server); err != nil {
 		return ManagedServerResult{}, err
@@ -255,13 +415,7 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 	if err != nil {
 		return ManagedServerResult{}, err
 	}
-	cmd := exec.Command(server,
-		"-hf", opts.ModelRef,
-		"--host", "127.0.0.1",
-		"--port", "8080",
-		"--cors-origins", "localhost",
-		"--no-cors-credentials",
-	)
+	cmd := exec.Command(server, managedServerArgs(opts.ModelRef)...)
 	cmd.Dir = filepath.Dir(server)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -270,7 +424,7 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 		return ManagedServerResult{}, err
 	}
 	if opts.Progress != nil {
-		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server started; waiting for Gemma to download and become ready"})
+		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server started with the low-memory profile; waiting for Gemma to become ready"})
 	}
 	res := ManagedServerResult{
 		Started:  true,
@@ -279,7 +433,7 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 		LogFile:  logPath,
 		Endpoint: DefaultURL,
 		ModelRef: opts.ModelRef,
-		Message:  "llama-server started; first run may download the model and take a few minutes",
+		Message:  "llama-server started with the compact low-memory profile; the first run may download the model",
 	}
 	exited := make(chan error, 1)
 	go func() {
@@ -305,12 +459,12 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 			return res, nil
 		}
 		if opts.Progress != nil && attempt%4 == 0 {
-			opts.Progress(SetupProgress{Stage: "waiting", Message: "Gemma is still downloading or loading; checking the local server again"})
+			opts.Progress(SetupProgress{Stage: "waiting", Message: "Gemma is still loading; checking the local health endpoint again"})
 		}
 		time.Sleep(700 * time.Millisecond)
 	}
 	if opts.Progress != nil {
-		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server is running; Gemma is still downloading or loading"})
+		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server is running; Gemma is still loading with the low-memory profile"})
 	}
 	select {
 	case exitErr := <-exited:
@@ -321,6 +475,38 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 	default:
 	}
 	return res, nil
+}
+
+// managedServerArgs reserves memory for the operating system and keeps the
+// optional advisor responsive on small unified-memory machines. Aegis only
+// needs text analysis, so it deliberately avoids multimodal projector files.
+func managedServerArgs(modelRef string) []string {
+	threads := runtime.NumCPU() / 2
+	if threads < 2 {
+		threads = 2
+	}
+	if threads > 4 {
+		threads = 4
+	}
+	return []string{
+		"-hf", modelRef,
+		"--host", "127.0.0.1",
+		"--port", "8080",
+		"--cors-origins", "localhost",
+		"--no-cors-credentials",
+		"--no-mmproj",
+		"--ctx-size", "2048",
+		"--batch-size", "256",
+		"--ubatch-size", "128",
+		"--parallel", "1",
+		"--threads", strconv.Itoa(threads),
+		"--threads-batch", strconv.Itoa(threads),
+		"--n-gpu-layers", "0",
+		"--no-kv-offload",
+		"--fit", "on",
+		"--fit-target", "2048",
+		"--fit-ctx", "2048",
+	}
 }
 
 var versionedDylib = regexp.MustCompile(`^(lib.+?)\.([0-9]+)\.[0-9.]+\.dylib$`)

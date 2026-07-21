@@ -295,12 +295,25 @@ Recommended local path:
 aegis ai install
 ```
 
-`aegis ai install` is the one-command default. It downloads or updates the
-matching llama.cpp release for your OS/CPU, configures Aegis for
+`aegis ai install` is the one-command default. It reuses the matching installed
+llama.cpp release and Hugging Face cache when available; otherwise it downloads
+the matching release for your OS/CPU, configures Aegis for
 `http://127.0.0.1:8080/v1/chat/completions`, starts `llama-server` with the
-recommended Gemma GGUF Hugging Face ref, and writes server logs to the Aegis
-config directory. It is safe to run again; if a compatible server is already
-running, Aegis reuses it.
+recommended compact Gemma GGUF Hugging Face ref, and writes server logs to the
+Aegis config directory. It uses one server slot, a 2K context, bounded CPU
+threads, CPU-only inference, and text-only mode to keep 8 GB machines responsive.
+It is safe to run
+again; if a compatible server is already running, Aegis reuses it.
+
+To release the model's memory and CPU when you are finished:
+
+```sh
+aegis ai stop
+```
+
+The GUI has the same **Stop local AI** action. Aegis verifies that the listener
+on its local port belongs to `llama-server`, asks it to exit cleanly, waits for
+the port to close, and only uses a forced stop after a short timeout.
 
 Guided setup without starting the model:
 
@@ -312,7 +325,7 @@ aegis ai setup --download-llama
 Server mode:
 
 ```sh
-llama-server -hf lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M --host 127.0.0.1 --port 8080
+llama-server -hf ggml-org/gemma-3-1b-it-GGUF:Q4_K_M --no-mmproj --ctx-size 2048 --batch-size 256 --parallel 1 --n-gpu-layers 0 --no-kv-offload --host 127.0.0.1 --port 8080
 aegis ai config --backend llamacpp-server --endpoint http://127.0.0.1:8080/v1/chat/completions
 ```
 
@@ -362,9 +375,9 @@ aegis ai config --backend openai-compatible \
 
 Recommended model family:
 
-- Gemma 4 E4B instruct GGUF, Q4_K_M
-- Gemma 3 4B instruct GGUF, Q4_K_M fallback
-- Gemma 2B instruct GGUF for smaller machines
+- Gemma 3 1B instruct GGUF, Q4_K_M: the Aegis default for 8 GB machines
+- Gemma 3 4B instruct GGUF, Q4_K_M: opt in on systems with at least 16 GB RAM
+- Gemma 4 E4B instruct GGUF: large multimodal model; do not use on 8 GB systems
 
 Review each model license before operational use.
 
