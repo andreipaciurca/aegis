@@ -213,3 +213,83 @@ func TestEnsureLlamaRuntimeLinks(t *testing.T) {
 		t.Fatalf("alias target = %q, want %q", got, versioned)
 	}
 }
+
+func TestCheckServerUsesModelMetadataEndpoint(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Errorf("readiness request = %s %s, want GET /v1/models", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	status := Check(Config{Backend: BackendServer, Endpoint: server.URL + "/v1/chat/completions"})
+	if !status.ServerReady || status.Message != "ready" {
+		t.Fatalf("server status = %+v, want healthy server", status)
+	}
+	if calls != 1 {
+		t.Fatalf("health calls = %d, want 1", calls)
+	}
+}
+
+func TestCheckServerDoesNotTreatCLIAsServerReadiness(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	status := Check(Config{Backend: BackendServer, Endpoint: "http://127.0.0.1:1/v1/chat/completions"})
+	if status.ServerReady || status.CLIReady {
+		t.Fatalf("unreachable server should not be ready: %+v", status)
+	}
+	if !strings.Contains(status.Message, "server unavailable") {
+		t.Fatalf("unexpected status message: %q", status.Message)
+	}
+}
+
+func TestManagedServerArgsUseCompactProfile(t *testing.T) {
+	args := strings.Join(managedServerArgs(DefaultModelRef), " ")
+	for _, want := range []string{
+		"-hf " + DefaultModelRef,
+		"--no-mmproj",
+		"--ctx-size 2048",
+		"--batch-size 256",
+		"--ubatch-size 128",
+		"--parallel 1",
+		"--n-gpu-layers 0",
+		"--no-kv-offload",
+		"--fit-target 2048",
+	} {
+		if !strings.Contains(args, want) {
+			t.Errorf("managed server arguments missing %q: %s", want, args)
+		}
+	}
+}
+
+func TestParseListenerPIDAcrossSupportedPlatforms(t *testing.T) {
+	tests := []struct {
+		name   string
+		goos   string
+		output string
+		want   int
+	}{
+		{name: "macOS lsof", goos: "unix", output: "4312\n", want: 4312},
+		{name: "Linux ss", goos: "linux", output: "LISTEN 0 4096 127.0.0.1:8080 0.0.0.0:* users:((\"llama-server\",pid=912,fd=6))\n", want: 912},
+		{name: "Windows netstat", goos: "windows", output: "  TCP    127.0.0.1:8080       0.0.0.0:0              LISTENING       2468\r\n", want: 2468},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseListenerPID(tt.output, tt.goos)
+			if err != nil || got != tt.want {
+				t.Fatalf("parseListenerPID(%q, %q) = %d, %v; want %d, nil", tt.output, tt.goos, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseListenerPIDRejectsUnrelatedOutput(t *testing.T) {
+	if _, err := parseListenerPID("LISTEN 0 4096 127.0.0.1:9090 0.0.0.0:*", "linux"); err == nil {
+		t.Fatal("expected unrelated listener output to be rejected")
+	}
+	if _, err := parseListenerPID("  TCP    0.0.0.0:8080         0.0.0.0:0              LISTENING       2468\r\n", "windows"); err == nil {
+		t.Fatal("expected public Windows listener output to be rejected")
+	}
+}

@@ -730,12 +730,11 @@ func (m Model) viewAI() string {
 		b.WriteString("  " + cardTitleStyle.Render("SETUP") + "\n")
 		b.WriteString("  " + warnStyle.Render("Ask/test/explain are disabled until a local llama.cpp backend is ready.") + "\n")
 		setup := []string{
-			"1. Run: aegis ai setup",
-			"2. Optional managed llama.cpp install/update: aegis ai setup --download-llama",
-			"3. Recommended model: Gemma 4 E4B or Gemma 3 4B instruct GGUF, Q4_K_M",
-			"4. Fast model path: llama-server -hf lmstudio-community/gemma-4-E4B-it-GGUF:Q4_K_M --host 127.0.0.1 --port 8080",
-			"5. Configure: aegis ai config --backend llamacpp-server --endpoint http://127.0.0.1:8080/v1/chat/completions",
-			"6. Press r here after starting/configuring it.",
+			"1. Run: aegis ai install",
+			"2. It reuses installed llama.cpp and cached files when available.",
+			"3. Default: Gemma 3 1B instruct GGUF, Q4_K_M (compact for 8 GB machines).",
+			"4. It starts one text-only, low-memory server on 127.0.0.1:8080.",
+			"5. Press r here to refresh readiness; ask/explain unlock when it is ready.",
 		}
 		for _, line := range setup {
 			b.WriteString("  " + dimStyle.Render(wrapText(line, max(m.width-6, 36), "  ")) + "\n")
