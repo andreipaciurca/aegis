@@ -162,7 +162,7 @@ func TestExtractTarGzRejectsAbsolutePath(t *testing.T) {
 	}
 }
 
-func TestExtractTarGzPreservesSafeSymlink(t *testing.T) {
+func TestExtractTarGzIgnoresSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "links.tar.gz")
 	writeTarGzEntries(t, tarPath, []*tar.Header{
@@ -177,23 +177,12 @@ func TestExtractTarGzPreservesSafeSymlink(t *testing.T) {
 		t.Fatalf("Extract: %v", err)
 	}
 	link := filepath.Join(dest, "llama", "libllama.0.dylib")
-	info, err := os.Lstat(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("%s is not a symlink", link)
-	}
-	got, err := os.Readlink(link)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "libllama.0.0.10075.dylib" {
-		t.Fatalf("link target = %q", got)
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Fatalf("archive-controlled symlink should not be extracted, got %v", err)
 	}
 }
 
-func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
+func TestExtractTarGzIgnoresEscapingSymlink(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := filepath.Join(dir, "evil-links.tar.gz")
 	writeTarGzEntries(t, tarPath, []*tar.Header{
@@ -203,8 +192,11 @@ func TestExtractTarGzRejectsEscapingSymlink(t *testing.T) {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Extract(tarPath, dest); err == nil {
-		t.Fatal("expected unsafe symlink target error, got nil")
+	if err := Extract(tarPath, dest); err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, "llama", "escape")); !os.IsNotExist(err) {
+		t.Fatalf("unsafe symlink should not be extracted, got %v", err)
 	}
 }
 

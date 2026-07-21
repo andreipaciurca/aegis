@@ -324,28 +324,39 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 }
 
 var versionedDylib = regexp.MustCompile(`^(lib.+?)\.([0-9]+)\.[0-9.]+\.dylib$`)
+var versionedSharedObject = regexp.MustCompile(`^(lib.+?\.so)\.([0-9]+)(?:\.[0-9]+)*$`)
 
-// ensureLlamaRuntimeLinks repairs compatibility aliases that macOS llama.cpp
-// releases ship as tar symlinks. Older Aegis versions did not extract those
-// links, leaving otherwise valid installations unable to start.
+// ensureLlamaRuntimeLinks repairs macOS and Linux compatibility aliases that
+// llama.cpp releases ship as tar symlinks. Older Aegis versions did not
+// extract those links, leaving otherwise valid installations unable to start.
 func ensureLlamaRuntimeLinks(server string) error {
-	if runtime.GOOS != "darwin" {
-		return nil
-	}
 	dir := filepath.Dir(server)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
+	var pattern *regexp.Regexp
+	switch runtime.GOOS {
+	case "darwin":
+		pattern = versionedDylib
+	case "linux":
+		pattern = versionedSharedObject
+	default:
+		return nil
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		match := versionedDylib.FindStringSubmatch(entry.Name())
+		match := pattern.FindStringSubmatch(entry.Name())
 		if match == nil {
 			continue
 		}
-		alias := filepath.Join(dir, match[1]+"."+match[2]+".dylib")
+		extension := ".dylib"
+		if runtime.GOOS == "linux" {
+			extension = ""
+		}
+		alias := filepath.Join(dir, match[1]+"."+match[2]+extension)
 		if _, err := os.Lstat(alias); err == nil {
 			continue
 		} else if !os.IsNotExist(err) {
