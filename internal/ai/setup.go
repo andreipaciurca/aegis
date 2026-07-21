@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -242,6 +243,9 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 	if err != nil {
 		return ManagedServerResult{}, err
 	}
+	if err := ensureLlamaRuntimeLinks(server); err != nil {
+		return ManagedServerResult{}, err
+	}
 	dir, err := signatures.Dir()
 	if err != nil {
 		return ManagedServerResult{}, err
@@ -251,7 +255,14 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 	if err != nil {
 		return ManagedServerResult{}, err
 	}
-	cmd := exec.Command(server, "-hf", opts.ModelRef, "--host", "127.0.0.1", "--port", "8080")
+	cmd := exec.Command(server,
+		"-hf", opts.ModelRef,
+		"--host", "127.0.0.1",
+		"--port", "8080",
+		"--cors-origins", "localhost",
+		"--no-cors-credentials",
+	)
+	cmd.Dir = filepath.Dir(server)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -270,12 +281,21 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 		ModelRef: opts.ModelRef,
 		Message:  "llama-server started; first run may download the model and take a few minutes",
 	}
+	exited := make(chan error, 1)
 	go func() {
-		_ = cmd.Wait()
+		exited <- cmd.Wait()
 		_ = logFile.Close()
 	}()
 	deadline := time.Now().Add(opts.Wait)
 	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		select {
+		case exitErr := <-exited:
+			if exitErr == nil {
+				exitErr = fmt.Errorf("exited without reporting readiness")
+			}
+			return ManagedServerResult{}, fmt.Errorf("llama-server exited before becoming ready; inspect %s: %w", logPath, exitErr)
+		default:
+		}
 		if st := Check(cfg); st.ServerReady {
 			res.Ready = true
 			res.Message = "llama-server is ready"
@@ -292,7 +312,61 @@ func StartManagedServer(opts ManagedServerOptions) (ManagedServerResult, error) 
 	if opts.Progress != nil {
 		opts.Progress(SetupProgress{Stage: "waiting", Message: "llama-server is running; Gemma is still downloading or loading"})
 	}
+	select {
+	case exitErr := <-exited:
+		if exitErr == nil {
+			exitErr = fmt.Errorf("exited without reporting readiness")
+		}
+		return ManagedServerResult{}, fmt.Errorf("llama-server exited before becoming ready; inspect %s: %w", logPath, exitErr)
+	default:
+	}
 	return res, nil
+}
+
+var versionedDylib = regexp.MustCompile(`^(lib.+?)\.([0-9]+)\.[0-9.]+\.dylib$`)
+var versionedSharedObject = regexp.MustCompile(`^(lib.+?\.so)\.([0-9]+)(?:\.[0-9]+)*$`)
+
+// ensureLlamaRuntimeLinks repairs macOS and Linux compatibility aliases that
+// llama.cpp releases ship as tar symlinks. Older Aegis versions did not
+// extract those links, leaving otherwise valid installations unable to start.
+func ensureLlamaRuntimeLinks(server string) error {
+	dir := filepath.Dir(server)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	var pattern *regexp.Regexp
+	switch runtime.GOOS {
+	case "darwin":
+		pattern = versionedDylib
+	case "linux":
+		pattern = versionedSharedObject
+	default:
+		return nil
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		match := pattern.FindStringSubmatch(entry.Name())
+		if match == nil {
+			continue
+		}
+		extension := ".dylib"
+		if runtime.GOOS == "linux" {
+			extension = ""
+		}
+		alias := filepath.Join(dir, match[1]+"."+match[2]+extension)
+		if _, err := os.Lstat(alias); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Symlink(entry.Name(), alias); err != nil {
+			return fmt.Errorf("create llama.cpp runtime link %s: %w", alias, err)
+		}
+	}
+	return nil
 }
 
 func resolveLlamaServer(installDir string) (string, error) {

@@ -65,3 +65,18 @@ func TestAIConfigReadyUsesConfiguredBackend(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeAIInstallWaitingFixesLegacyCompleteState(t *testing.T) {
+	srv := &Server{aiInstallJob: &aiInstallJob{
+		State:      "complete",
+		Stage:      "waiting",
+		FinishedAt: "2026-07-21T11:12:42Z",
+	}}
+	srv.normalizeAIInstallWaiting()
+	if srv.aiInstallJob.State != "waiting" {
+		t.Fatalf("state = %q, want waiting", srv.aiInstallJob.State)
+	}
+	if srv.aiInstallJob.FinishedAt != "" {
+		t.Fatalf("finished_at = %q, want empty until the model is ready", srv.aiInstallJob.FinishedAt)
+	}
+}

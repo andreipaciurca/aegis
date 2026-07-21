@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -184,5 +185,31 @@ func TestPlanSetupIsPortableAndActionable(t *testing.T) {
 	}
 	if strings.Contains(text, home) || strings.Contains(text, "/Users/") {
 		t.Fatalf("copy-paste commands should avoid hardcoded user paths: %s", text)
+	}
+}
+
+func TestEnsureLlamaRuntimeLinks(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS dynamic library compatibility links only")
+	}
+	dir := t.TempDir()
+	server := filepath.Join(dir, "llama-server")
+	if err := os.WriteFile(server, []byte("server"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versioned := "libllama-common.0.0.10075.dylib"
+	if err := os.WriteFile(filepath.Join(dir, versioned), []byte("library"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureLlamaRuntimeLinks(server); err != nil {
+		t.Fatalf("ensureLlamaRuntimeLinks: %v", err)
+	}
+	alias := filepath.Join(dir, "libllama-common.0.dylib")
+	got, err := os.Readlink(alias)
+	if err != nil {
+		t.Fatalf("read repaired alias: %v", err)
+	}
+	if got != versioned {
+		t.Fatalf("alias target = %q, want %q", got, versioned)
 	}
 }

@@ -118,6 +118,12 @@ func extractTarGz(path, dest string) error {
 			if closeErr != nil {
 				return closeErr
 			}
+		case tar.TypeSymlink:
+			// Do not materialize archive-controlled symlinks. A crafted link can
+			// redirect a later archive entry outside dest even when each entry
+			// passes lexical path validation. Callers that need known runtime
+			// aliases recreate them from trusted, extracted library filenames.
+			continue
 		}
 	}
 }
